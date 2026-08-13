@@ -19,5 +19,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=5 \
   CMD wget -q -O - http://localhost:8080/internal/actuator/health/readiness || exit 1
 
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-jar", "/app/app.jar"]
-

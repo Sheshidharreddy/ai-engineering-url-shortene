@@ -1,0 +1,5 @@
+aws_region         = "us-east-2"
+base_domain        = "example.com"
+ecr_repository_url = "123456789012.dkr.ecr.us-east-2.amazonaws.com/sheshidhar-url-shortener"
+image_tag           = "replace-with-git-sha"
+alarm_email         = "platform-alerts@example.com"

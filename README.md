@@ -2,9 +2,11 @@
 
 Production-oriented URL shortener built with Java 21, Spring Boot 3.5, PostgreSQL, Redis, Flyway, OpenAPI, Actuator, and Testcontainers.
 
+Production infrastructure targets AWS ECS Fargate through Terraform, with isolated dev, UAT, and production environments.
+
 ## Architecture
 
-The application is a single Spring Boot deployable organized into controller, service, repository, entity, DTO, exception, configuration, validation, and mapper layers under `com.sheshidhar.urlshortener`. PostgreSQL is the source of truth, Redis is a cache-aside optimization for redirects, and analytics events are persisted asynchronously on a bounded executor.
+The application is a single Spring Boot deployable organized into controller, service, repository, entity, DTO, exception, configuration, validation, and mapper layers under `com.sheshidhar.urlshortener`. PostgreSQL is the source of truth, Redis is a cache-aside optimization for redirects, and analytics uses a durable PostgreSQL outbox with eventually consistent event aggregation.
 
 ## Behavior
 
@@ -13,6 +15,7 @@ The application is a single Spring Boot deployable organized into controller, se
 ```http
 POST /api/v1/urls
 Content-Type: application/json
+Idempotency-Key: create-product-123
 
 {
   "url": "https://example.com/products/123",
@@ -21,7 +24,7 @@ Content-Type: application/json
 }
 ```
 
-`customAlias` and `expiresAt` are optional. A successful request returns `201 Created` with `shortCode`, `shortUrl`, `originalUrl`, `createdAt`, and `expiresAt`.
+`customAlias`, `expiresAt`, and the `Idempotency-Key` header are optional. Retrying the same normalized request with the same 8–128 character key returns the original mapping; reusing a key for a different request returns `409 Conflict`. A successful request returns `201 Created` with `shortCode`, `shortUrl`, `originalUrl`, `createdAt`, and `expiresAt`.
 
 ### Redirect
 
@@ -36,7 +39,7 @@ GET /{shortCode}
 | Unknown short code | `404 Not Found` |
 | Previously created but expired URL | `410 Gone` |
 
-Redis is checked before PostgreSQL. A database cache miss populates Redis, with TTL capped at the URL expiration time. Analytics is recorded asynchronously and cannot break a successful redirect.
+Redis is checked before PostgreSQL. A database cache miss populates Redis, with TTL capped at the URL expiration time. Concurrent misses for one code are coalesced to one database load per application replica. Successful resolution attempts to durably enqueue analytics, but enqueue failure is isolated and cannot change the redirect response.
 
 ### URL metadata
 
@@ -52,7 +55,7 @@ Returns `shortCode`, `shortUrl`, `originalUrl`, `createdAt`, `expiresAt`, and `e
 GET /api/v1/urls/{shortCode}/analytics
 ```
 
-Returns `shortCode`, `totalClickCount`, `createdAt`, and `lastAccessedAt`. A URL with no redirects has a count of zero and a null `lastAccessedAt`. Results are eventually consistent because redirect events are persisted asynchronously. Referrer, user-agent, and IP address are not collected to minimize personal data and retention obligations.
+Returns `shortCode`, `totalClickCount`, `createdAt`, and `lastAccessedAt`. A URL with no redirects has a count of zero and a null `lastAccessedAt`. Results are eventually consistent while durable outbox rows are dispatched. Raw events are retained for 90 days by default, so counts cover the configured retention window. Referrer, user-agent, and IP address are not collected.
 
 ### Delete a short URL
 
@@ -82,6 +85,8 @@ curl -i -X POST http://localhost:8080/api/v1/urls \
 curl -i http://localhost:8080/product123
 ```
 
+The management API is intentionally unauthenticated for local development. When `MANAGEMENT_API_KEY` is configured, every `/api/v1/urls/**` request must include `X-API-Key`; public redirects remain unauthenticated.
+
 Operational endpoints:
 
 - Swagger UI: <http://localhost:8080/docs/swagger-ui.html>
@@ -90,6 +95,7 @@ Operational endpoints:
 - Liveness: <http://localhost:8080/internal/actuator/health/liveness>
 - Readiness: <http://localhost:8080/internal/actuator/health/readiness>
 - Metrics: <http://localhost:8080/internal/actuator/metrics>
+- Prometheus: <http://localhost:8080/internal/actuator/prometheus>
 
 Stop services with `docker compose down`. Add `--volumes` only when you intentionally want to delete local PostgreSQL and Redis data.
 
@@ -103,7 +109,7 @@ mvn clean verify
 
 Unit and MockMvc tests run without infrastructure. Testcontainers tests start real PostgreSQL and Redis when a compatible Docker daemon is available. CI uses Temurin Java 21 and runs the full suite.
 
-Testcontainers can skip its integration class when Docker is unavailable or its API cannot be negotiated, even if Maven itself reports success. Confirm that the final result has zero skipped tests. Legacy Docker daemons limited to API 1.41 can use `mvn -Dapi.version=1.41 clean verify`; that compatibility command was used for the verified 83-test, zero-skip local run. CI separately asserts that the 14 container-backed tests executed.
+Testcontainers can skip its integration class when Docker is unavailable or its API cannot be negotiated, even if Maven itself reports success. Confirm that the final result has zero skipped tests. Legacy Docker daemons limited to API 1.41 can use `mvn -Dapi.version=1.41 clean verify`. CI separately asserts that the container-backed integration tests executed.
 
 ## Configuration
 
@@ -114,13 +120,32 @@ Configuration is externalized through environment variables. Important defaults 
 | `DB_URL` | `jdbc:postgresql://localhost:5432/url_shortener` |
 | `DB_USERNAME` | `url_shortener` |
 | `DB_PASSWORD` | Required; Docker Compose supplies a local development value |
+| `DB_POOL_SIZE` | `10` connections per replica |
+| `DB_CONNECT_TIMEOUT_SECONDS` | `3` |
+| `DB_SOCKET_TIMEOUT_SECONDS` | `10` |
+| `DB_QUERY_TIMEOUT_MS` | `5000` |
+| `DB_LOCK_TIMEOUT_MS` | `3000` |
 | `REDIS_HOST` | `localhost` |
 | `REDIS_PORT` | `6379` |
+| `REDIS_PASSWORD` | Empty locally; required by Terraform-managed Redis |
+| `REDIS_SSL` | `false` locally; `true` on AWS |
 | `BASE_URL` | `http://localhost:8080` |
+| `MANAGEMENT_API_KEY` | Empty locally; generated in AWS Secrets Manager |
 | `SHORT_CODE_LENGTH` | `8` |
 | `URL_CACHE_TTL` | `24h` |
+| `ANALYTICS_DISPATCH_BATCH_SIZE` | `100` |
+| `ANALYTICS_RETENTION` | `90d` |
+| `SHUTDOWN_TIMEOUT` | `45s` |
 
-Production deployments must set `DB_PASSWORD`, replace local development credentials, and set `BASE_URL` to the public HTTPS origin.
+Production deployments must set `DB_PASSWORD`, replace local development credentials, and set `BASE_URL` to the public HTTPS origin. Terraform defines each replica's pool size and rejects a plan when the maximum replica count would exceed the environment's application connection budget.
+
+## Deploy to AWS
+
+Terraform definitions under `infra/` provide private multi-AZ ECS Fargate services, ALB/ACM/WAF, Multi-AZ PostgreSQL, failover Redis with TLS, Secrets Manager, backups, autoscaling, CloudWatch, X-Ray, Prometheus, alarms, and rolling rollback-safe releases.
+
+Suggested DNS names are `dev.go.<owned-domain>`, `uat.go.<owned-domain>`, and `go.<owned-domain>`. The owned Route53 domain, AWS account, region, state bucket, alert destination, and GitHub environment approvals must be supplied by the operator.
+
+See [AWS infrastructure](infra/README.md) for bootstrap/deployment steps and [production operations](docs/OPERATIONS.md) for SLOs, alerting, rollback, restore, failover, rotation, and on-call procedures.
 
 Copy `.env.example` when you need a local environment-variable template. Docker Compose supplies its own local service values, so copying the file is not required for `docker compose up --build`.
 
@@ -141,7 +166,7 @@ AI assisted with repository review and implementation options; the engineer supp
 - PostgreSQL provides authoritative uniqueness and deletion correctness, but cache misses depend on database availability.
 - Redis improves redirect latency and cache-hit availability, but requires expiry-aware values and carefully ordered invalidation.
 - A pessimistic read lock closes the deletion/cache race, but cache-miss transactions can briefly delay deletion.
-- Asynchronous analytics protects redirect reliability, but delivery is best effort and can undercount.
+- A PostgreSQL outbox survives application crashes after enqueue and supports competing dispatchers, but an enqueue failure can still undercount and is intentionally isolated from redirects.
 
 ## Engineering documentation
 
@@ -152,8 +177,9 @@ AI assisted with repository review and implementation options; the engineer supp
 - [Three engineering scenarios](docs/SCENARIOS.md)
 - [Trade-offs](docs/TRADEOFFS.md)
 - [Security](docs/SECURITY.md)
+- [Production operations](docs/OPERATIONS.md)
 - [Engineer-led AI usage](docs/AI_USAGE.md)
 
 ## Known limitations
 
-The service has no authentication, ownership, rate limiting, or public-link abuse controls. Analytics is eventually consistent and best effort. Operational endpoints must be network-restricted in production. PostgreSQL driver socket/query deadlines are not globally configured, and creation currently classifies any database integrity violation as a code collision or alias conflict. These boundaries are intentional for the assessment and are detailed in the linked documentation.
+The AWS deployment uses one environment-level API key rather than user identity or per-link ownership. WAF provides gateway rate limiting and AWS-managed IP/input protections, but destination phishing classification still requires an external reputation provider and an abuse-response process. Analytics can undercount when PostgreSQL rejects the initial outbox enqueue, and retention intentionally removes raw events after the configured period. The platform is multi-AZ, not multi-region, and backup restorability must be proven through scheduled drills.

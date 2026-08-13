@@ -1,0 +1,276 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - dev
+          - uat
+          - prod
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Run complete test suite
+        run: mvn --batch-mode --no-transfer-progress clean verify
+
+      - name: Assert integration tests executed
+        run: grep -Eq '<testsuite .*tests="20" errors="0" skipped="0" failures="0"' target/surefire-reports/TEST-com.sheshidhar.urlshortener.integration.RedirectIntegrationTest.xml
+
+  build-and-deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ${{ inputs.environment }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: sheshidhar-url-shortener
+      IMAGE_TAG: ${{ github.sha }}
+      TF_DIRECTORY: infra/environments/${{ inputs.environment }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials through GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v6.1.3
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: github-${{ github.run_id }}-${{ inputs.environment }}
+
+      - name: Resolve ECR repository
+        id: ecr
+        shell: bash
+        run: |
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          registry="${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          echo "registry=${registry}" >> "${GITHUB_OUTPUT}"
+          echo "repository_url=${registry}/${ECR_REPOSITORY}" >> "${GITHUB_OUTPUT}"
+          existing_digest="$(aws ecr describe-images \
+            --repository-name "${ECR_REPOSITORY}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || true)"
+          if [[ -n "${existing_digest}" && "${existing_digest}" != "None" ]]; then
+            echo "image_exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "image_exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Sign in to ECR
+        shell: bash
+        run: aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${{ steps.ecr.outputs.registry }}"
+
+      - name: Build immutable application image
+        if: steps.ecr.outputs.image_exists != 'true'
+        shell: bash
+        run: docker build --pull --tag "${{ steps.ecr.outputs.repository_url }}:${IMAGE_TAG}" .
+
+      - name: Push immutable application image
+        if: steps.ecr.outputs.image_exists != 'true'
+        shell: bash
+        run: docker push "${{ steps.ecr.outputs.repository_url }}:${IMAGE_TAG}"
+
+      - name: Wait for ECR scan and block critical/high findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          scan_ready=false
+          for attempt in {1..40}; do
+            status="$(aws ecr describe-image-scan-findings \
+              --repository-name "${ECR_REPOSITORY}" \
+              --image-id imageTag="${IMAGE_TAG}" \
+              --query 'imageScanStatus.status' \
+              --output text 2>/dev/null || true)"
+            if [[ "${status}" == "COMPLETE" || "${status}" == "ACTIVE" ]]; then
+              scan_ready=true
+              break
+            fi
+            if [[ "${status}" == "FAILED" || "${status}" == "UNSUPPORTED_IMAGE" ]]; then
+              echo "ECR image scan failed with status ${status}" >&2
+              exit 1
+            fi
+            sleep 15
+          done
+          if [[ "${scan_ready}" != "true" ]]; then
+            echo "ECR image scan did not become ready before timeout" >&2
+            exit 1
+          fi
+          findings="$(aws ecr describe-image-scan-findings \
+            --repository-name "${ECR_REPOSITORY}" \
+            --image-id imageTag="${IMAGE_TAG}" \
+            --query 'imageScanFindings.findingSeverityCounts.[CRITICAL,HIGH]' \
+            --output text)"
+          read -r critical high <<< "${findings}"
+          critical="${critical:-0}"
+          high="${high:-0}"
+          [[ "${critical}" == "None" ]] && critical=0
+          [[ "${high}" == "None" ]] && high=0
+          echo "ECR scan findings: critical=${critical}, high=${high}"
+          if (( critical > 0 || high > 0 )); then
+            echo "Release blocked by ECR vulnerability policy" >&2
+            exit 1
+          fi
+
+      - name: Resolve image digest
+        id: image
+        shell: bash
+        run: |
+          digest="$(aws ecr describe-images --repository-name "${ECR_REPOSITORY}" --image-ids imageTag="${IMAGE_TAG}" --query 'imageDetails[0].imageDigest' --output text)"
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Check for an existing trusted signature
+        id: signature
+        continue-on-error: true
+        shell: bash
+        run: |
+          cosign verify \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/deploy.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ steps.ecr.outputs.repository_url }}@${{ steps.image.outputs.digest }}"
+
+      - name: Sign image with GitHub OIDC identity
+        if: steps.signature.outcome == 'failure'
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign "${{ steps.ecr.outputs.repository_url }}@${{ steps.image.outputs.digest }}"
+
+      - name: Verify image signature identity
+        shell: bash
+        run: |
+          cosign verify \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/deploy.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ steps.ecr.outputs.repository_url }}@${{ steps.image.outputs.digest }}"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+
+      - name: Capture current task definition for emergency rollback
+        id: previous
+        shell: bash
+        run: |
+          cluster="sheshidhar-url-shortener-${{ inputs.environment }}"
+          task_definition="$(aws ecs describe-services \
+            --cluster "${cluster}" \
+            --services "${cluster}" \
+            --query 'services[0].taskDefinition' \
+            --output text 2>/dev/null || true)"
+          if [[ "${task_definition}" == "None" ]]; then
+            task_definition=""
+          fi
+          echo "task_definition=${task_definition}" >> "${GITHUB_OUTPUT}"
+
+      - name: Initialize Terraform
+        working-directory: ${{ env.TF_DIRECTORY }}
+        run: >-
+          terraform init -input=false
+          -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+          -backend-config="key=sheshidhar-url-shortener/${{ inputs.environment }}/terraform.tfstate"
+          -backend-config="region=${AWS_REGION}"
+
+      - name: Validate Terraform
+        working-directory: ${{ env.TF_DIRECTORY }}
+        run: terraform validate
+
+      - name: Plan release
+        working-directory: ${{ env.TF_DIRECTORY }}
+        run: >-
+          terraform plan -input=false -out=release.tfplan
+          -var="aws_region=${AWS_REGION}"
+          -var="base_domain=${{ vars.BASE_DOMAIN }}"
+          -var="ecr_repository_url=${{ steps.ecr.outputs.repository_url }}"
+          -var="image_tag=${IMAGE_TAG}"
+          -var="alarm_email=${{ vars.ALARM_EMAIL }}"
+
+      - name: Apply rolling release
+        working-directory: ${{ env.TF_DIRECTORY }}
+        run: terraform apply -input=false -auto-approve release.tfplan
+
+      - name: Wait for ECS steady state
+        shell: bash
+        run: |
+          cluster="sheshidhar-url-shortener-${{ inputs.environment }}"
+          aws ecs wait services-stable --cluster "${cluster}" --services "${cluster}"
+
+      - name: Smoke test public endpoints
+        shell: bash
+        env:
+          SERVICE_URL: ${{ inputs.environment == 'prod' && format('https://go.{0}', vars.BASE_DOMAIN) || format('https://{0}.go.{1}', inputs.environment, vars.BASE_DOMAIN) }}
+        run: |
+          set -euo pipefail
+          management_key="$(aws secretsmanager get-secret-value \
+            --secret-id "sheshidhar-url-shortener-${{ inputs.environment }}/application" \
+            --query SecretString --output text | jq -r .management_api_key)"
+          response="$(curl --fail-with-body --silent --show-error \
+            -X POST "${SERVICE_URL}/api/v1/urls" \
+            -H 'Content-Type: application/json' \
+            -H "X-API-Key: ${management_key}" \
+            -d '{"url":"https://example.com"}')"
+          short_code="$(jq -r .shortCode <<< "${response}")"
+          test -n "${short_code}"
+          curl --fail-with-body --silent --show-error \
+            -H "X-API-Key: ${management_key}" \
+            "${SERVICE_URL}/api/v1/urls/${short_code}" >/dev/null
+          location="$(curl --silent --show-error --output /dev/null --write-out '%{redirect_url}' "${SERVICE_URL}/${short_code}")"
+          test "${location}" = "https://example.com"
+          curl --fail-with-body --silent --show-error \
+            -X DELETE \
+            -H "X-API-Key: ${management_key}" \
+            "${SERVICE_URL}/api/v1/urls/${short_code}" >/dev/null
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' "${SERVICE_URL}/${short_code}")"
+          test "${status}" = "404"
+
+      - name: Roll back failed release
+        if: failure() && steps.previous.outputs.task_definition != ''
+        shell: bash
+        run: |
+          cluster="sheshidhar-url-shortener-${{ inputs.environment }}"
+          aws ecs update-service \
+            --cluster "${cluster}" \
+            --service "${cluster}" \
+            --task-definition "${{ steps.previous.outputs.task_definition }}" \
+            --force-new-deployment
+          aws ecs wait services-stable --cluster "${cluster}" --services "${cluster}"
+
+      - name: Write release summary
+        if: always()
+        run: |
+          {
+            echo "### Release"
+            echo "- Environment: ${{ inputs.environment }}"
+            echo "- Image: \`${{ steps.ecr.outputs.repository_url }}@${{ steps.image.outputs.digest }}\`"
+            echo "- Commit: \`${{ github.sha }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

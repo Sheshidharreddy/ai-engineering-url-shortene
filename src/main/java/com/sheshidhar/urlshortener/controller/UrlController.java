@@ -10,6 +10,7 @@ import com.sheshidhar.urlshortener.service.UrlDeletionService;
 import com.sheshidhar.urlshortener.service.UrlMetadataService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -18,12 +19,14 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
 
 @RestController
 @RequestMapping("/api/v1/urls")
+@SecurityRequirement(name = "managementApiKey")
 public class UrlController {
 
     private final UrlCreationService urlCreationService;
@@ -48,8 +51,11 @@ public class UrlController {
     @ApiResponse(responseCode = "400", description = "Request validation failed")
     @ApiResponse(responseCode = "409", description = "Custom alias already exists")
     @PostMapping
-    public ResponseEntity<CreateUrlResponse> create(@Valid @RequestBody CreateUrlRequest request) {
-        CreateUrlResponse response = urlCreationService.create(request);
+    public ResponseEntity<CreateUrlResponse> create(
+            @Valid @RequestBody CreateUrlRequest request,
+            @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey
+    ) {
+        CreateUrlResponse response = urlCreationService.create(request, idempotencyKey);
         return ResponseEntity.created(URI.create(response.shortUrl())).body(response);
     }
 

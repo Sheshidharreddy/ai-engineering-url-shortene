@@ -13,6 +13,12 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Optional;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -21,6 +27,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.times;
 
 class UrlRedirectServiceTest {
 
@@ -100,6 +107,49 @@ class UrlRedirectServiceTest {
         doThrow(new TaskRejectedException("queue full")).when(analyticsRecorder).record(CODE, NOW);
 
         assertThat(service.resolve(CODE)).isEqualTo(DESTINATION);
+    }
+
+    @Test
+    void coalescesConcurrentCacheMissesIntoOneDatabaseLoadPerReplica() throws Exception {
+        int requestCount = 12;
+        CountDownLatch allRequestsAtCache = new CountDownLatch(requestCount);
+        CountDownLatch databaseStarted = new CountDownLatch(1);
+        CountDownLatch releaseDatabase = new CountDownLatch(1);
+        when(cache.find(CODE)).thenAnswer(invocation -> {
+            allRequestsAtCache.countDown();
+            if (!allRequestsAtCache.await(5, TimeUnit.SECONDS)) {
+                throw new AssertionError("Requests did not reach the cache together");
+            }
+            return Optional.empty();
+        });
+        when(databaseResolver.resolveAndCache(CODE)).thenAnswer(invocation -> {
+            databaseStarted.countDown();
+            if (!releaseDatabase.await(5, TimeUnit.SECONDS)) {
+                throw new AssertionError("Database load was not released");
+            }
+            return DESTINATION;
+        });
+        ExecutorService executor = Executors.newFixedThreadPool(requestCount);
+
+        try {
+            List<Future<String>> resolutions = java.util.stream.IntStream.range(0, requestCount)
+                    .mapToObj(ignored -> executor.submit(() -> service.resolve(CODE)))
+                    .toList();
+
+            assertThat(databaseStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            Thread.sleep(200);
+            verify(databaseResolver).resolveAndCache(CODE);
+            releaseDatabase.countDown();
+
+            for (Future<String> resolution : resolutions) {
+                assertThat(resolution.get(5, TimeUnit.SECONDS)).isEqualTo(DESTINATION);
+            }
+            verify(databaseResolver).resolveAndCache(CODE);
+            verify(analyticsRecorder, times(requestCount)).record(CODE, NOW);
+        } finally {
+            releaseDatabase.countDown();
+            executor.shutdownNow();
+        }
     }
 
     @Test

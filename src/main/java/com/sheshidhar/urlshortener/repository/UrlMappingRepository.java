@@ -15,6 +15,8 @@ public interface UrlMappingRepository extends JpaRepository<UrlMapping, UUID> {
 
     Optional<UrlMapping> findByShortCode(String shortCode);
 
+    Optional<UrlMapping> findByIdempotencyKey(String idempotencyKey);
+
     @Lock(LockModeType.PESSIMISTIC_READ)
     @Query("SELECT mapping FROM UrlMapping mapping WHERE mapping.shortCode = :shortCode")
     Optional<UrlMapping> findByShortCodeForRedirect(@Param("shortCode") String shortCode);

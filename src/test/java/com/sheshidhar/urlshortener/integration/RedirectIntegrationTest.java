@@ -5,16 +5,24 @@ import com.sheshidhar.urlshortener.config.UrlShortenerProperties;
 import com.sheshidhar.urlshortener.dto.CreateUrlRequest;
 import com.sheshidhar.urlshortener.dto.CreateUrlResponse;
 import com.sheshidhar.urlshortener.dto.CachedUrl;
+import com.sheshidhar.urlshortener.entity.RedirectAnalyticsOutboxEntry;
+import com.sheshidhar.urlshortener.entity.RedirectEvent;
 import com.sheshidhar.urlshortener.entity.UrlMapping;
 import com.sheshidhar.urlshortener.exception.AliasAlreadyExistsException;
 import com.sheshidhar.urlshortener.mapper.UrlMapper;
+import com.sheshidhar.urlshortener.repository.DatabaseConstraintClassifier;
+import com.sheshidhar.urlshortener.repository.RedirectAnalyticsOutboxRepository;
+import com.sheshidhar.urlshortener.repository.RedirectAnalyticsOutboxProcessor;
+import com.sheshidhar.urlshortener.repository.RedirectAnalyticsRetentionProcessor;
 import com.sheshidhar.urlshortener.repository.RedirectEventRepository;
 import com.sheshidhar.urlshortener.repository.UrlMappingRepository;
 import com.sheshidhar.urlshortener.repository.UrlMappingWriter;
 import com.sheshidhar.urlshortener.service.RedisUrlCache;
+import com.sheshidhar.urlshortener.service.RedirectAnalyticsOutboxDispatcher;
 import com.sheshidhar.urlshortener.service.ShortCodeGenerator;
 import com.sheshidhar.urlshortener.service.UrlCreationService;
 import com.sheshidhar.urlshortener.service.UrlDeletionService;
+import com.sheshidhar.urlshortener.service.UrlRedirectDatabaseResolver;
 import com.sheshidhar.urlshortener.validator.DestinationUrlValidator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,9 +31,12 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.core.env.Environment;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -45,14 +56,19 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -79,6 +95,8 @@ class RedirectIntegrationTest {
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
         registry.add("app.url-shortener.base-url", () -> "http://localhost");
+        registry.add("app.analytics.dispatch-interval", () -> "1h");
+        registry.add("app.analytics.retention-cleanup-interval", () -> "1h");
     }
 
     @Autowired
@@ -89,6 +107,18 @@ class RedirectIntegrationTest {
 
     @Autowired
     private RedirectEventRepository redirectEventRepository;
+
+    @Autowired
+    private RedirectAnalyticsOutboxRepository outboxRepository;
+
+    @Autowired
+    private RedirectAnalyticsOutboxDispatcher outboxDispatcher;
+
+    @Autowired
+    private RedirectAnalyticsOutboxProcessor outboxProcessor;
+
+    @Autowired
+    private RedirectAnalyticsRetentionProcessor retentionProcessor;
 
     @Autowired
     private StringRedisTemplate redisTemplate;
@@ -123,10 +153,23 @@ class RedirectIntegrationTest {
     @Autowired
     private PlatformTransactionManager transactionManager;
 
+    @Autowired
+    private DatabaseConstraintClassifier constraintClassifier;
+
+    @Autowired
+    private DataSource dataSource;
+
+    @Autowired
+    private Environment environment;
+
+    @MockitoSpyBean
+    private UrlRedirectDatabaseResolver databaseResolver;
+
     @BeforeEach
     void cleanState() {
-        redirectEventRepository.deleteAll();
-        urlMappingRepository.deleteAll();
+        outboxRepository.deleteAllInBatch();
+        redirectEventRepository.deleteAllInBatch();
+        urlMappingRepository.deleteAllInBatch();
         try (RedisConnection connection = redisTemplate.getConnectionFactory().getConnection()) {
             connection.serverCommands().flushDb();
         }
@@ -148,9 +191,57 @@ class RedirectIntegrationTest {
                 .andExpect(header().string("Location", "https://example.com/products/1"));
 
         await().atMost(Duration.ofSeconds(5))
-                .untilAsserted(() -> org.assertj.core.api.Assertions.assertThat(
-                        redirectEventRepository.countByShortCode("product1")).isEqualTo(1));
+                .untilAsserted(() -> {
+                    outboxDispatcher.dispatch();
+                    org.assertj.core.api.Assertions.assertThat(
+                            redirectEventRepository.countByShortCode("product1")).isEqualTo(1);
+                });
         org.assertj.core.api.Assertions.assertThat(redisTemplate.hasKey("short-url:product1")).isTrue();
+    }
+
+    @Test
+    void repeatedCreationWithSameIdempotencyKeyReturnsOriginalMapping() throws Exception {
+        String requestBody = """
+                {"url":"https://example.com/idempotent","customAlias":"idempotent1"}
+                """;
+
+        mockMvc.perform(post("/api/v1/urls")
+                        .header("Idempotency-Key", "create-request-001")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(requestBody))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.shortCode").value("idempotent1"));
+
+        mockMvc.perform(post("/api/v1/urls")
+                        .header("Idempotency-Key", "create-request-001")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(requestBody))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.shortCode").value("idempotent1"));
+
+        assertThat(urlMappingRepository.count()).isEqualTo(1);
+    }
+
+    @Test
+    void idempotencyKeyReuseWithDifferentPayloadReturnsConflict() throws Exception {
+        mockMvc.perform(post("/api/v1/urls")
+                        .header("Idempotency-Key", "create-request-002")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"url":"https://example.com/first","customAlias":"idemfirst"}
+                                """))
+                .andExpect(status().isCreated());
+
+        mockMvc.perform(post("/api/v1/urls")
+                        .header("Idempotency-Key", "create-request-002")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"url":"https://example.com/second","customAlias":"idemsecond"}
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("IDEMPOTENCY_CONFLICT"));
+
+        assertThat(urlMappingRepository.count()).isEqualTo(1);
     }
 
     @Test
@@ -176,6 +267,48 @@ class RedirectIntegrationTest {
                             assertThat(connection.ping()).isEqualTo("PONG");
                         }
                     });
+        }
+    }
+
+    @Test
+    void simulatedColdCacheAfterRedisRestartProducesOneDatabaseLoadPerReplica() throws Exception {
+        String shortCode = "stampede1";
+        urlMappingRepository.saveAndFlush(UrlMapping.create(
+                shortCode,
+                "https://example.com/after-redis-restart",
+                Instant.now().minusSeconds(60),
+                null
+        ));
+
+        try (RedisConnection connection = redisTemplate.getConnectionFactory().getConnection()) {
+            connection.serverCommands().flushDb();
+        }
+        reset(databaseResolver);
+
+        int requestCount = 16;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(requestCount);
+        try {
+            List<Future<Integer>> requests = java.util.stream.IntStream.range(0, requestCount)
+                    .mapToObj(ignored -> executor.submit(() -> {
+                        awaitLatch(start);
+                        return mockMvc.perform(get("/" + shortCode))
+                                .andReturn()
+                                .getResponse()
+                                .getStatus();
+                    }))
+                    .toList();
+            start.countDown();
+
+            for (Future<Integer> request : requests) {
+                assertThat(request.get(10, TimeUnit.SECONDS)).isEqualTo(302);
+            }
+
+            verify(databaseResolver, times(1)).resolveAndCache(shortCode);
+            assertThat(redisTemplate.hasKey("short-url:" + shortCode)).isTrue();
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
         }
     }
 
@@ -239,8 +372,11 @@ class RedirectIntegrationTest {
                 .andExpect(status().isFound());
 
         await().atMost(Duration.ofSeconds(5))
-                .untilAsserted(() -> org.assertj.core.api.Assertions.assertThat(
-                        redirectEventRepository.countByShortCode("analytic1")).isEqualTo(2));
+                .untilAsserted(() -> {
+                    outboxDispatcher.dispatch();
+                    org.assertj.core.api.Assertions.assertThat(
+                            redirectEventRepository.countByShortCode("analytic1")).isEqualTo(2);
+                });
 
         mockMvc.perform(get("/api/v1/urls/analytic1/analytics"))
                 .andExpect(status().isOk())
@@ -248,6 +384,50 @@ class RedirectIntegrationTest {
                 .andExpect(jsonPath("$.totalClickCount").value(2))
                 .andExpect(jsonPath("$.createdAt").exists())
                 .andExpect(jsonPath("$.lastAccessedAt").exists());
+    }
+
+    @Test
+    void concurrentOutboxDispatchersDoNotDuplicateEvents() throws Exception {
+        Instant now = Instant.now();
+        outboxRepository.saveAllAndFlush(java.util.stream.IntStream.range(0, 20)
+                .mapToObj(index -> RedirectAnalyticsOutboxEntry.create("outbox01", now.plusMillis(index), now))
+                .toList());
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<Integer> first = executor.submit(() -> {
+                awaitLatch(start);
+                return outboxProcessor.processNextBatch(20);
+            });
+            Future<Integer> second = executor.submit(() -> {
+                awaitLatch(start);
+                return outboxProcessor.processNextBatch(20);
+            });
+            start.countDown();
+
+            assertThat(first.get(5, TimeUnit.SECONDS) + second.get(5, TimeUnit.SECONDS)).isEqualTo(20);
+            assertThat(redirectEventRepository.countByShortCode("outbox01")).isEqualTo(20);
+            assertThat(outboxRepository.count()).isZero();
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void analyticsRetentionDeletesOnlyExpiredEventsWithinBatchLimit() {
+        Instant now = Instant.now();
+        redirectEventRepository.saveAllAndFlush(List.of(
+                RedirectEvent.create("retain01", now.minus(Duration.ofDays(100))),
+                RedirectEvent.create("retain01", now.minus(Duration.ofDays(95))),
+                RedirectEvent.create("retain01", now.minus(Duration.ofDays(10)))
+        ));
+
+        assertThat(retentionProcessor.deleteExpiredBatch(now.minus(Duration.ofDays(90)), 1)).isEqualTo(1);
+        assertThat(redirectEventRepository.countByShortCode("retain01")).isEqualTo(2);
+        assertThat(retentionProcessor.deleteExpiredBatch(now.minus(Duration.ofDays(90)), 10)).isEqualTo(1);
+        assertThat(redirectEventRepository.countByShortCode("retain01")).isEqualTo(1);
     }
 
     @Test
@@ -262,8 +442,11 @@ class RedirectIntegrationTest {
         mockMvc.perform(get("/delete01"))
                 .andExpect(status().isFound());
         await().atMost(Duration.ofSeconds(5))
-                .untilAsserted(() -> org.assertj.core.api.Assertions.assertThat(
-                        redirectEventRepository.countByShortCode("delete01")).isEqualTo(1));
+                .untilAsserted(() -> {
+                    outboxDispatcher.dispatch();
+                    org.assertj.core.api.Assertions.assertThat(
+                            redirectEventRepository.countByShortCode("delete01")).isEqualTo(1);
+                });
         org.assertj.core.api.Assertions.assertThat(redisTemplate.hasKey("short-url:delete01")).isTrue();
 
         mockMvc.perform(delete("/api/v1/urls/delete01"))
@@ -358,8 +541,25 @@ class RedirectIntegrationTest {
         mockMvc.perform(get("/internal/actuator/health/readiness"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("UP"));
+        mockMvc.perform(get("/internal/actuator/prometheus"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("jvm_memory_used_bytes")));
         mockMvc.perform(get("/internal/actuator/info"))
                 .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void databaseDeadlinesAndGracefulShutdownAreConfigured() {
+        com.zaxxer.hikari.HikariDataSource hikariDataSource = (com.zaxxer.hikari.HikariDataSource) dataSource;
+        assertThat(hikariDataSource.getConnectionTimeout()).isEqualTo(3_000);
+        assertThat(hikariDataSource.getDataSourceProperties().getProperty("connectTimeout")).isEqualTo("3");
+        assertThat(hikariDataSource.getDataSourceProperties().getProperty("socketTimeout")).isEqualTo("10");
+        assertThat(new JdbcTemplate(dataSource).queryForObject("SHOW statement_timeout", String.class))
+                .isEqualTo("5s");
+        assertThat(new JdbcTemplate(dataSource).queryForObject("SHOW lock_timeout", String.class))
+                .isEqualTo("3s");
+        assertThat(environment.getProperty("server.shutdown")).isEqualTo("graceful");
+        assertThat(environment.getProperty("spring.lifecycle.timeout-per-shutdown-phase")).isEqualTo("45s");
     }
 
     @Test
@@ -448,6 +648,7 @@ class RedirectIntegrationTest {
         UrlCreationService collisionAwareService = new UrlCreationService(
                 urlMappingRepository,
                 urlMappingWriter,
+                constraintClassifier,
                 generator,
                 destinationUrlValidator,
                 urlShortenerProperties,

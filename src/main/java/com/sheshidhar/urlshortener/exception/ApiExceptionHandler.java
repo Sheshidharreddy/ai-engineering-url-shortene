@@ -5,6 +5,8 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -61,6 +63,11 @@ public class ApiExceptionHandler {
         return response(HttpStatus.CONFLICT, "ALIAS_ALREADY_EXISTS", "Alias already exists", exception.getMessage());
     }
 
+    @ExceptionHandler(IdempotencyConflictException.class)
+    ResponseEntity<ProblemDetail> handleIdempotencyConflict(IdempotencyConflictException exception) {
+        return response(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT", "Idempotency conflict", exception.getMessage());
+    }
+
     @ExceptionHandler(UrlNotFoundException.class)
     ResponseEntity<ProblemDetail> handleNotFound(UrlNotFoundException exception) {
         return response(HttpStatus.NOT_FOUND, "SHORT_URL_NOT_FOUND", "Short URL not found", exception.getMessage());
@@ -77,7 +84,12 @@ public class ApiExceptionHandler {
                 "Short code temporarily unavailable", exception.getMessage());
     }
 
-    @ExceptionHandler({DataAccessResourceFailureException.class, CannotCreateTransactionException.class})
+    @ExceptionHandler({
+            DataAccessResourceFailureException.class,
+            CannotAcquireLockException.class,
+            QueryTimeoutException.class,
+            CannotCreateTransactionException.class
+    })
     ResponseEntity<ProblemDetail> handleDatabaseUnavailable() {
         return response(HttpStatus.SERVICE_UNAVAILABLE, "DATABASE_UNAVAILABLE",
                 "Service temporarily unavailable", "The primary data store is temporarily unavailable");

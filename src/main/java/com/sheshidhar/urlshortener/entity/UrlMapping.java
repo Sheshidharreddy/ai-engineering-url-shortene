@@ -27,20 +27,55 @@ public class UrlMapping {
     @Column(name = "expires_at")
     private Instant expiresAt;
 
+    @Column(name = "idempotency_key", unique = true, length = 128)
+    private String idempotencyKey;
+
+    @Column(name = "request_fingerprint", length = 64)
+    private String requestFingerprint;
+
     protected UrlMapping() {
         // Required by JPA.
     }
 
-    private UrlMapping(UUID id, String shortCode, String originalUrl, Instant createdAt, Instant expiresAt) {
+    private UrlMapping(
+            UUID id,
+            String shortCode,
+            String originalUrl,
+            Instant createdAt,
+            Instant expiresAt,
+            String idempotencyKey,
+            String requestFingerprint
+    ) {
         this.id = id;
         this.shortCode = shortCode;
         this.originalUrl = originalUrl;
         this.createdAt = createdAt;
         this.expiresAt = expiresAt;
+        this.idempotencyKey = idempotencyKey;
+        this.requestFingerprint = requestFingerprint;
     }
 
     public static UrlMapping create(String shortCode, String originalUrl, Instant createdAt, Instant expiresAt) {
-        return new UrlMapping(UUID.randomUUID(), shortCode, originalUrl, createdAt, expiresAt);
+        return create(shortCode, originalUrl, createdAt, expiresAt, null, null);
+    }
+
+    public static UrlMapping create(
+            String shortCode,
+            String originalUrl,
+            Instant createdAt,
+            Instant expiresAt,
+            String idempotencyKey,
+            String requestFingerprint
+    ) {
+        return new UrlMapping(
+                UUID.randomUUID(),
+                shortCode,
+                originalUrl,
+                createdAt,
+                expiresAt,
+                idempotencyKey,
+                requestFingerprint
+        );
     }
 
     public boolean isExpiredAt(Instant instant) {
@@ -65,5 +100,13 @@ public class UrlMapping {
 
     public Instant getExpiresAt() {
         return expiresAt;
+    }
+
+    public String getIdempotencyKey() {
+        return idempotencyKey;
+    }
+
+    public String getRequestFingerprint() {
+        return requestFingerprint;
     }
 }

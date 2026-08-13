@@ -20,11 +20,22 @@ The OpenAPI JSON specification is available at:
 http://localhost:8080/v3/api-docs
 ```
 
+## Management Authentication
+
+When `MANAGEMENT_API_KEY` is configured, all `/api/v1/urls/**` endpoints require:
+
+```http
+X-API-Key: <management-api-key>
+```
+
+Missing or invalid credentials return `401 Unauthorized`. Local development leaves the key empty by default, disabling this filter. `GET /{shortCode}` remains public by design.
+
 ## Create a Short URL
 
 ```http
 POST /api/v1/urls
 Content-Type: application/json
+Idempotency-Key: create-product-123
 ```
 
 ### Request
@@ -44,6 +55,8 @@ Content-Type: application/json
 | `expiresAt` | No | Future expiration timestamp in ISO-8601 UTC format. |
 
 If `customAlias` is omitted, the service generates a collision-resistant short code.
+
+`Idempotency-Key` is optional and must contain 8–128 letters, numbers, periods, colons, hyphens, or underscores. A retry with the same key and normalized request returns the original mapping. The key is retained with the mapping; after deletion, the same key may create a new mapping.
 
 ### Successful Response
 
@@ -67,7 +80,7 @@ The `Location` response header contains the new short URL.
 | --- | --- |
 | `201 Created` | Short URL created. |
 | `400 Bad Request` | JSON, URL, alias, or expiration validation failed. |
-| `409 Conflict` | The requested custom alias already exists. |
+| `409 Conflict` | The custom alias exists, or the idempotency key was used for a different request. |
 | `503 Service Unavailable` | PostgreSQL is unavailable or a generated code could not be allocated. |
 
 ### Example
@@ -75,6 +88,7 @@ The `Location` response header contains the new short URL.
 ```bash
 curl -i -X POST http://localhost:8080/api/v1/urls \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: create-product-123' \
   -d '{"url":"https://example.com/products/123","customAlias":"product123"}'
 ```
 
@@ -159,7 +173,7 @@ Status: `200 OK`
 }
 ```
 
-`lastAccessedAt` is `null` before the first recorded redirect. Analytics are persisted asynchronously and are eventually consistent. Failed or expired redirects are not counted.
+`lastAccessedAt` is `null` before the first recorded redirect. Analytics are durably enqueued before being dispatched to event storage, so reads are eventually consistent. Failed or expired redirects are not counted. Raw events older than `ANALYTICS_RETENTION` are removed in bounded batches; the default analytics window is 90 days.
 
 ### Responses
 

@@ -1,0 +1,5 @@
+bucket       = "replace-with-terraform-state-bucket"
+key          = "sheshidhar-url-shortener/prod/terraform.tfstate"
+region       = "us-east-2"
+encrypt      = true
+use_lockfile = true

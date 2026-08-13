@@ -12,7 +12,7 @@ Status values:
 
 | Result | Count |
 | --- | ---: |
-| PASS | 43 |
+| PASS | 48 |
 | PARTIAL | 0 |
 | FAIL | 0 |
 
@@ -32,6 +32,8 @@ Every minimum requirement listed in Step 2 has a corresponding implementation an
 | Database uniqueness constraint | Flyway constraint `uq_url_mappings_short_code`; `UrlMapping.shortCode` | `RedirectIntegrationTest.databaseEnforcesShortCodeUniqueness`; `RedirectIntegrationTest.simultaneousCustomAliasCreationCreatesExactlyOneMapping` | PASS |
 | Duplicate custom alias handling | `UrlCreationService.createWithCustomAlias`; `AliasAlreadyExistsException`; `ApiExceptionHandler` | `UrlCreationServiceTest.returnsConflictWhenAliasAlreadyExists`; `UrlControllerTest.returnsConflictForDuplicateAlias`; `RedirectIntegrationTest.simultaneousCustomAliasCreationCreatesExactlyOneMapping` | PASS |
 | Collision retry | `UrlCreationService.createWithGeneratedCode` uses bounded database-backed retries | `UrlCreationServiceTest.retriesGeneratedCodeAfterDatabaseCollision`; `UrlCreationServiceTest.failsAfterGeneratedCodeRetryLimitIsExhausted`; `UrlControllerTest.returnsServiceUnavailableWhenUniqueCodeCannotBeAllocated`; `RedirectIntegrationTest.generatedCodeCollisionRetriesAfterDatabaseConstraintFailure` | PASS |
+| Idempotent creation retry | Optional `Idempotency-Key`, request fingerprint, and authoritative unique constraint | `UrlCreationServiceTest.returnsOriginalResponseWhenIdempotencyKeyIsReplayed`; `UrlCreationServiceTest.replaysConcurrentIdempotentCreationAfterDatabaseConflict`; `RedirectIntegrationTest.repeatedCreationWithSameIdempotencyKeyReturnsOriginalMapping` | PASS |
+| Constraint-specific failure handling | `DatabaseConstraintClassifier`; named Flyway constraints | `DatabaseConstraintClassifierTest`; `UrlCreationServiceTest.doesNotTreatUnrelatedIntegrityFailureAsCollision`; `RedirectIntegrationTest.generatedCodeCollisionRetriesAfterDatabaseConstraintFailure` | PASS |
 | DTO response | `CreateUrlResponse` | `UrlControllerTest.returnsCreatedResponseAndLocation` | PASS |
 | `createdAt` | `UrlMapping.createdAt`; `CreateUrlResponse.createdAt` | `UrlCreationServiceTest.createsCustomAliasAndBuildsResponse` | PASS |
 | `expiresAt` | `UrlMapping.expiresAt`; `CreateUrlResponse.expiresAt` | `UrlCreationServiceTest.createsCustomAliasAndBuildsResponse` | PASS |
@@ -47,8 +49,9 @@ Every minimum requirement listed in Step 2 has a corresponding implementation an
 | PostgreSQL fallback | `UrlRedirectDatabaseResolver.resolveAndCache` | `UrlRedirectServiceTest.queriesPostgresAndPopulatesRedisOnCacheMiss`; `UrlRedirectDatabaseResolverTest.resolvesLockedMappingAndPopulatesCache`; `RedirectControllerTest.returnsServiceUnavailableWhenPrimaryDatabaseCannotBeReached`; `RedirectIntegrationTest.redisOutageFallsBackToPostgresForRedirect` | PASS |
 | Expiration check | `CachedUrl.isExpiredAt`; `UrlMapping.isExpiredAt` | `UrlRedirectServiceTest.returnsGoneForExpiredCachedValue`; `UrlRedirectDatabaseResolverTest.rejectsExpiredMappingWithoutPopulatingCache`; `RedirectIntegrationTest.expiredMappingReturnsGone` | PASS |
 | Cache population | `UrlRedirectDatabaseResolver.resolveAndCache`; `RedisUrlCache.put` | `UrlRedirectDatabaseResolverTest.resolvesLockedMappingAndPopulatesCache`; `RedirectIntegrationTest.createThenCacheMissRedirectsPopulatesRedisAndRecordsAnalytics`; `RedirectIntegrationTest.malformedCachedValueFallsBackToPostgresAndRepairsCache` | PASS |
+| Cache stampede control | `UrlRedirectService` coalesces concurrent misses per short code and replica | `UrlRedirectServiceTest.coalescesConcurrentCacheMissesIntoOneDatabaseLoadPerReplica`; `RedirectIntegrationTest.simulatedColdCacheAfterRedisRestartProducesOneDatabaseLoadPerReplica` | PASS |
 | Analytics invocation | `UrlRedirectService.recordAnalyticsWithoutAffectingRedirect` | `UrlRedirectServiceTest.returnsUnexpiredRedisValueWithoutQueryingPostgres`; `RedirectIntegrationTest.analyticsAggregatesPersistedRedirectEvents` | PASS |
-| Analytics failure isolation | `UrlRedirectService` contains submission failures; `AsyncRedirectAnalyticsRecorder` contains persistence failures | `UrlRedirectServiceTest.analyticsSubmissionFailureDoesNotBreakRedirect`; `AsyncRedirectAnalyticsRecorderTest.persistenceFailureIsContainedAndCounted` | PASS |
+| Analytics failure isolation | `UrlRedirectService` contains outbox enqueue failures; dispatcher failures leave rows for retry | `UrlRedirectServiceTest.analyticsSubmissionFailureDoesNotBreakRedirect`; `DurableRedirectAnalyticsRecorderTest.enqueueFailureIsCountedAndPropagatedForRedirectBoundaryToContain` | PASS |
 | Redirect response | `RedirectController` returns HTTP `302` and `Location` | `RedirectControllerTest.returnsFoundWithDestinationLocation` | PASS |
 
 ## Metadata
@@ -67,9 +70,11 @@ Every minimum requirement listed in Step 2 has a corresponding implementation an
 | `totalClickCount` | `RedirectEventRepository.summarizeByShortCode`; `UrlAnalyticsResponse` | `UrlAnalyticsServiceTest.returnsAggregatedAnalytics`; `RedirectIntegrationTest.analyticsAggregatesPersistedRedirectEvents` | PASS |
 | `createdAt` | `UrlAnalyticsService` reads the current mapping creation time | `UrlAnalyticsServiceTest.returnsAggregatedAnalytics`; `UrlControllerTest.returnsUrlAnalytics` | PASS |
 | `lastAccessedAt` | `MAX(RedirectEvent.occurredAt)` projection | `UrlAnalyticsServiceTest.returnsAggregatedAnalytics`; `UrlControllerTest.returnsAnalyticsWithNoLastAccessForUnusedUrl` | PASS |
-| Successful redirects counted | `UrlRedirectService` invokes asynchronous recording only after successful resolution | `RedirectIntegrationTest.analyticsAggregatesPersistedRedirectEvents` | PASS |
+| Successful redirects counted | `UrlRedirectService` enqueues analytics only after successful resolution | `RedirectIntegrationTest.analyticsAggregatesPersistedRedirectEvents` | PASS |
 | Failed redirects not counted | Unknown and expired paths throw before analytics invocation | `UrlRedirectServiceTest.returnsNotFoundWhenPostgresDoesNotContainCode`; `UrlRedirectServiceTest.returnsGoneForExpiredCachedValue`; `UrlRedirectDatabaseResolverTest.rejectsExpiredMappingWithoutPopulatingCache` | PASS |
-| Analytics failure does not break redirect | Best-effort asynchronous recorder and bounded failure handling | `UrlRedirectServiceTest.analyticsSubmissionFailureDoesNotBreakRedirect`; `AsyncRedirectAnalyticsRecorderTest.persistenceFailureIsContainedAndCounted` | PASS |
+| Analytics failure does not break redirect | Durable outbox recorder and explicit redirect isolation boundary | `UrlRedirectServiceTest.analyticsSubmissionFailureDoesNotBreakRedirect`; `DurableRedirectAnalyticsRecorderTest.enqueueFailureIsCountedAndPropagatedForRedirectBoundaryToContain` | PASS |
+| Durable multi-replica dispatch | PostgreSQL outbox claimed with `FOR UPDATE SKIP LOCKED` | `RedirectAnalyticsOutboxProcessorTest`; `RedirectIntegrationTest.concurrentOutboxDispatchersDoNotDuplicateEvents` | PASS |
+| Bounded analytics retention | Indexed occurrence time and configurable batched deletion | `RedirectIntegrationTest.analyticsRetentionDeletesOnlyExpiredEventsWithinBatchLimit` | PASS |
 | No unnecessary sensitive data retained | `RedirectEvent` stores only short code and occurrence timestamp | Static entity and migration review | PASS |
 
 ## Delete
@@ -77,7 +82,7 @@ Every minimum requirement listed in Step 2 has a corresponding implementation an
 | Requirement | Implementation | Test | Status |
 | --- | --- | --- | --- |
 | `DELETE /api/v1/urls/{shortCode}` | `UrlController.delete`; `UrlDeletionService`; `UrlDeletionWriter` | `UrlControllerTest.deletesUrlIdempotently`; `RedirectIntegrationTest.deleteRemovesMappingAnalyticsAndCacheAndAllowsSafeRetry` | PASS |
-| Database behavior | Transaction deletes analytics before the mapping | `UrlDeletionWriterTest.deletesAnalyticsBeforeMapping`; `RedirectIntegrationTest.deleteRemovesMappingAnalyticsAndCacheAndAllowsSafeRetry` | PASS |
+| Database behavior | Transaction deletes pending and persisted analytics before the mapping | `UrlDeletionWriterTest.deletesPendingAndPersistedAnalyticsBeforeMapping`; `RedirectIntegrationTest.deleteRemovesMappingAnalyticsAndCacheAndAllowsSafeRetry` | PASS |
 | Correct HTTP response | Idempotent HTTP `204 No Content` | `UrlControllerTest.deletesUrlIdempotently`; `RedirectIntegrationTest.deleteRemovesMappingAnalyticsAndCacheAndAllowsSafeRetry` | PASS |
 | Redis invalidation | Strict eviction before and after the committed database deletion | `UrlDeletionServiceTest.evictsBeforeAndAfterDatabaseDeletion`; `RedisUrlCacheTest.evictsCachedUrl` | PASS |
 | Nonexistent/deleted URL behavior | Bulk deletes are idempotent; endpoint remains `204` | `RedirectIntegrationTest.deleteRemovesMappingAnalyticsAndCacheAndAllowsSafeRetry` | PASS |
@@ -89,7 +94,7 @@ Every minimum requirement listed in Step 2 has a corresponding implementation an
 | --- | --- | --- | --- |
 | Health endpoint | Actuator at `/internal/actuator/health` | `RedirectIntegrationTest.actuatorProbesAreAvailable` | PASS |
 | Liveness | Actuator liveness group at `/internal/actuator/health/liveness` | `RedirectIntegrationTest.actuatorProbesAreAvailable` | PASS |
-| Readiness | Actuator readiness group includes application state and PostgreSQL | `RedirectIntegrationTest.actuatorProbesAreAvailable`; Docker image `HEALTHCHECK` | PASS |
+| Readiness | Actuator readiness group includes application state and PostgreSQL; graceful shutdown publishes refusing traffic | `RedirectIntegrationTest.actuatorProbesAreAvailable`; Docker image and ECS health checks | PASS |
 
 ## Verification Command
 
@@ -104,5 +109,5 @@ The Testcontainers integration class requires a compatible Docker daemon. CI exp
 Latest local verification on August 13, 2026:
 
 - `mvn --batch-mode --no-transfer-progress -Dapi.version=1.41 clean verify`
-- 83 tests passed with no failures, errors, or skips.
-- The result includes 69 unit, repository, and MockMvc tests plus all 14 PostgreSQL and Redis Testcontainers tests.
+- 107 tests passed with no failures, errors, or skips.
+- The result includes 87 unit, repository, and MockMvc tests plus all 20 PostgreSQL and Redis Testcontainers tests.

@@ -7,31 +7,56 @@ spring:
     password: ${DB_PASSWORD}
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:10}
-      connection-timeout: 3000
+      minimum-idle: ${DB_MIN_IDLE:2}
+      connection-timeout: ${DB_POOL_ACQUIRE_TIMEOUT_MS:3000}
+      validation-timeout: ${DB_VALIDATION_TIMEOUT_MS:2000}
+      idle-timeout: ${DB_IDLE_TIMEOUT_MS:600000}
+      max-lifetime: ${DB_MAX_LIFETIME_MS:1800000}
+      data-source-properties:
+        connectTimeout: ${DB_CONNECT_TIMEOUT_SECONDS:3}
+        socketTimeout: ${DB_SOCKET_TIMEOUT_SECONDS:10}
+        cancelSignalTimeout: ${DB_CANCEL_TIMEOUT_SECONDS:3}
+        tcpKeepAlive: true
+        options: "-c statement_timeout=${DB_QUERY_TIMEOUT_MS:5000} -c lock_timeout=${DB_LOCK_TIMEOUT_MS:3000}"
   jpa:
     open-in-view: false
     hibernate:
       ddl-auto: validate
     properties:
       hibernate.jdbc.time_zone: UTC
+      jakarta.persistence.query.timeout: ${DB_QUERY_TIMEOUT_MS:5000}
   flyway:
     enabled: true
   data:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
       connect-timeout: 500ms
       timeout: 500ms
+      ssl:
+        enabled: ${REDIS_SSL:false}
       repositories:
         enabled: false
+  task:
+    scheduling:
+      pool:
+        size: 2
+      thread-name-prefix: analytics-maintenance-
+      shutdown:
+        await-termination: true
+        await-termination-period: 10s
 
 server:
   port: ${SERVER_PORT:8080}
+  shutdown: graceful
   forward-headers-strategy: framework
   error:
     include-message: never
     include-binding-errors: never
     include-stacktrace: never
+
+spring.lifecycle.timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:45s}
 
 app:
   url-shortener:
@@ -40,16 +65,26 @@ app:
     max-generation-attempts: ${SHORT_CODE_MAX_ATTEMPTS:5}
     cache-ttl: ${URL_CACHE_TTL:24h}
   analytics:
-    core-pool-size: ${ANALYTICS_CORE_POOL_SIZE:2}
-    max-pool-size: ${ANALYTICS_MAX_POOL_SIZE:4}
-    queue-capacity: ${ANALYTICS_QUEUE_CAPACITY:500}
+    dispatch-batch-size: ${ANALYTICS_DISPATCH_BATCH_SIZE:100}
+    dispatch-interval: ${ANALYTICS_DISPATCH_INTERVAL:250ms}
+    retention: ${ANALYTICS_RETENTION:90d}
+    retention-batch-size: ${ANALYTICS_RETENTION_BATCH_SIZE:5000}
+    retention-max-batches: ${ANALYTICS_RETENTION_MAX_BATCHES:10}
+    retention-cleanup-interval: ${ANALYTICS_RETENTION_CLEANUP_INTERVAL:1m}
+  security:
+    management-api-key: ${MANAGEMENT_API_KEY:}
+    management-api-key-header: ${MANAGEMENT_API_KEY_HEADER:X-API-Key}
 
 management:
+  prometheus:
+    metrics:
+      export:
+        enabled: true
   endpoints:
     web:
       base-path: /internal/actuator
       exposure:
-        include: health,metrics
+        include: health,metrics,prometheus
   endpoint:
     health:
       probes:
@@ -63,6 +98,9 @@ management:
   health:
     redis:
       enabled: false
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:0.0}
 
 springdoc:
   swagger-ui:

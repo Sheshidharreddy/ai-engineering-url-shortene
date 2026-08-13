@@ -36,3 +36,11 @@ id_ed25519
 *.kdbx
 .ai/
 ai-scratch/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+.terraformrc
+terraform.rc

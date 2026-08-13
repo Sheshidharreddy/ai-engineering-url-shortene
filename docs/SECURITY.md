@@ -12,18 +12,22 @@
 - Application secrets, local environment variants, private keys, keystores, generated classes, and logs are excluded by `.gitignore`; `.env.example` contains development placeholders only.
 - Runtime configuration requires `DB_PASSWORD`; the application does not contain a fallback database password.
 - Health details are hidden, and Redis is not treated as an authoritative health dependency.
-- Actuator exposure is limited to health and metrics; the unused `info` endpoint is not exposed.
+- Actuator exposure is limited to health, metrics, and Prometheus; the AWS ALB returns `404` for public `/internal/actuator/**` requests.
+- When configured, a constant-time API-key filter protects create, metadata, analytics, and delete endpoints while redirects remain public.
+- AWS terminates TLS with ACM, redirects plaintext HTTP, places tasks and data stores in private subnets, and encrypts RDS, Redis, secrets, backups, and Terraform state.
+- AWS WAF applies managed common/known-bad/IP-reputation/anonymous-IP rules plus stricter URL-creation and global rate limits.
+- WAF logs redact the API-key header and complete query string; production logs are structured and centralized without destination request bodies.
 
 ## Operational requirements
 
 - Replace local database credentials and set `BASE_URL` to the public HTTPS origin in every non-local environment.
 - Store credentials in the deployment platform's secret manager; do not commit populated `.env` files.
 - Do not place credentials, access tokens, or other secrets in destination query parameters. Redirect responses and the metadata API intentionally return the complete destination URL.
-- Restrict `/internal/actuator/**`, especially metrics, to trusted operational networks. These endpoints are intentionally unauthenticated inside the application because authentication is outside this assessment's scope.
-- Apply gateway or load-balancer rate limits to creation, metadata, analytics, deletion, and redirect traffic.
-- Define authorization before exposing management endpoints to untrusted users. The current assessment API has no authentication or ownership model.
-- Add abuse, reputation, and phishing controls before offering public link creation.
-- Configure database TLS, Redis network isolation/TLS where supported, backup policy, log retention, and dependency patching for production.
+- Keep `/internal/actuator/**` private. The application does not authenticate Actuator because the task-local ADOT collector and ALB health checks need it; ALB listener rules prevent public forwarding.
+- Treat the management API key as a service credential. Rotate it, restrict retrieval, and do not treat it as user authentication or link ownership.
+- Require GitHub environment approval for UAT/production and restrict the OIDC deploy role with account isolation and an organization permission boundary.
+- Confirm WAF, SNS, ECR scanning, image signing, backup, restore, failover, and incident procedures in the target AWS accounts before launch.
+- Integrate a destination-reputation provider and staffed takedown process before allowing anonymous or untrusted link creation. WAF IP reputation protects callers; it does not classify a submitted destination.
 
 ## Threat boundaries
 
@@ -42,9 +46,12 @@ Redirect responses intentionally expose the destination through the `Location` h
 | Sensitive query parameters | CAUTION | The service does not log them, but its API contract returns the full destination URL in metadata and redirect responses. |
 | Configuration and repository secrets | PASS | Runtime database passwords are required, local secrets and key material are ignored, and current files plus Git history contain no high-confidence credentials. |
 | Debug and error exposure | PASS | Debug logging is not enabled; binding details, exception messages, and stack traces are excluded from server error responses. |
-| Management endpoints | PASS | Only health and metrics are exposed below `/internal/actuator`; health details are hidden and operational network restriction remains required. |
+| Management API | PASS WITH LIMITATION | Secrets Manager-backed API-key authorization is available and enabled by Terraform; it provides environment-level access, not identities or ownership. |
+| Operational endpoints | PASS | Health, metrics, and Prometheus remain application-visible but the AWS ALB blocks their public paths; health details remain hidden. |
+| Network and data encryption | PASS | ACM HTTPS, private tasks/data stores, RDS TLS, Redis TLS/auth, KMS encryption, and encrypted remote state are defined in Terraform. |
+| Abuse controls | PASS WITH ACTION ITEM | WAF rate/IP/input protections and authenticated creation are defined; destination reputation and takedown operations are required before untrusted creation. |
 
-No application-level authentication was added because this assessment does not define users, ownership, or an authorization model.
+No end-user identity or per-link ownership model was added because the product still does not define users or tenants.
 
 ## Reporting
 

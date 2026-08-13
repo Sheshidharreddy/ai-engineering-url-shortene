@@ -19,13 +19,17 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.time.Instant;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -57,7 +61,7 @@ class UrlControllerTest {
     @Test
     void returnsCreatedResponseAndLocation() throws Exception {
         Instant createdAt = Instant.parse("2026-08-12T18:00:00Z");
-        when(creationService.create(any(CreateUrlRequest.class))).thenReturn(new CreateUrlResponse(
+        when(creationService.create(any(CreateUrlRequest.class), eq("request-123"))).thenReturn(new CreateUrlResponse(
                 "product123",
                 "http://localhost:8080/product123",
                 "https://example.com/products/123",
@@ -66,6 +70,7 @@ class UrlControllerTest {
         ));
 
         mockMvc.perform(post("/api/v1/urls")
+                        .header("Idempotency-Key", "request-123")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"url":"https://example.com/products/123","customAlias":"product123"}
@@ -74,6 +79,8 @@ class UrlControllerTest {
                 .andExpect(header().string("Location", "http://localhost:8080/product123"))
                 .andExpect(jsonPath("$.shortCode").value("product123"))
                 .andExpect(jsonPath("$.originalUrl").value("https://example.com/products/123"));
+
+        verify(creationService).create(any(CreateUrlRequest.class), eq("request-123"));
     }
 
     @Test
@@ -115,7 +122,7 @@ class UrlControllerTest {
 
     @Test
     void returnsConflictForDuplicateAlias() throws Exception {
-        when(creationService.create(any(CreateUrlRequest.class)))
+        when(creationService.create(any(CreateUrlRequest.class), isNull()))
                 .thenThrow(new AliasAlreadyExistsException("product123"));
 
         mockMvc.perform(post("/api/v1/urls")
@@ -129,7 +136,7 @@ class UrlControllerTest {
 
     @Test
     void returnsServiceUnavailableWhenUniqueCodeCannotBeAllocated() throws Exception {
-        when(creationService.create(any(CreateUrlRequest.class)))
+        when(creationService.create(any(CreateUrlRequest.class), isNull()))
                 .thenThrow(new ShortCodeGenerationException());
 
         mockMvc.perform(post("/api/v1/urls")
@@ -172,6 +179,15 @@ class UrlControllerTest {
         mockMvc.perform(get("/api/v1/urls/missing1"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("SHORT_URL_NOT_FOUND"));
+    }
+
+    @Test
+    void returnsServiceUnavailableWhenDatabaseQueryTimesOut() throws Exception {
+        when(metadataService.get("product123")).thenThrow(new QueryTimeoutException("statement timeout"));
+
+        mockMvc.perform(get("/api/v1/urls/product123"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("DATABASE_UNAVAILABLE"));
     }
 
     @Test

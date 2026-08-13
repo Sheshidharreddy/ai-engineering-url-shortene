@@ -8,6 +8,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.Clock;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 @Service
 public class UrlRedirectService {
@@ -19,6 +23,7 @@ public class UrlRedirectService {
     private final ShortCodeValidator shortCodeValidator;
     private final RedirectAnalyticsRecorder analyticsRecorder;
     private final Clock clock;
+    private final ConcurrentMap<String, CompletableFuture<String>> inFlightCacheMisses = new ConcurrentHashMap<>();
 
     public UrlRedirectService(
             UrlCache cache,
@@ -39,7 +44,7 @@ public class UrlRedirectService {
         CachedUrl cachedUrl = cache.find(shortCode).orElse(null);
 
         String originalUrl = cachedUrl == null
-                ? databaseResolver.resolveAndCache(shortCode)
+                ? resolveCacheMiss(shortCode)
                 : resolveCached(shortCode, cachedUrl);
 
         recordAnalyticsWithoutAffectingRedirect(shortCode);
@@ -56,9 +61,40 @@ public class UrlRedirectService {
     private void recordAnalyticsWithoutAffectingRedirect(String shortCode) {
         try {
             analyticsRecorder.record(shortCode, clock.instant());
-        } catch (RuntimeException submissionFailure) {
-            // A full executor queue can reject before the async method starts; redirects must still succeed.
-            log.warn("Unable to submit redirect analytics for short code {}", shortCode, submissionFailure);
+        } catch (RuntimeException analyticsFailure) {
+            log.warn("Unable to durably enqueue redirect analytics for short code {} ({})",
+                    shortCode, analyticsFailure.getClass().getSimpleName());
+            log.debug("Analytics enqueue failure details for short code {}", shortCode, analyticsFailure);
+        }
+    }
+
+    private String resolveCacheMiss(String shortCode) {
+        CompletableFuture<String> leaderResult = new CompletableFuture<>();
+        CompletableFuture<String> existingResult = inFlightCacheMisses.putIfAbsent(shortCode, leaderResult);
+        if (existingResult != null) {
+            return await(existingResult);
+        }
+
+        try {
+            String originalUrl = databaseResolver.resolveAndCache(shortCode);
+            leaderResult.complete(originalUrl);
+            return originalUrl;
+        } catch (RuntimeException resolutionFailure) {
+            leaderResult.completeExceptionally(resolutionFailure);
+            throw resolutionFailure;
+        } finally {
+            inFlightCacheMisses.remove(shortCode, leaderResult);
+        }
+    }
+
+    private String await(CompletableFuture<String> result) {
+        try {
+            return result.join();
+        } catch (CompletionException failure) {
+            if (failure.getCause() instanceof RuntimeException runtimeFailure) {
+                throw runtimeFailure;
+            }
+            throw failure;
         }
     }
 }
