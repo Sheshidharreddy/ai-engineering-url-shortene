@@ -2,6 +2,7 @@ package com.sheshidhar.urlshortener.url;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sheshidhar.urlshortener.common.error.CacheInvalidationException;
 import com.sheshidhar.urlshortener.config.UrlShortenerProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,7 +14,7 @@ import java.time.Duration;
 import java.util.Optional;
 
 @Component
-public class RedisUrlCache implements UrlCache {
+public class RedisUrlCache implements UrlCache, UrlCacheInvalidator {
 
     private static final Logger log = LoggerFactory.getLogger(RedisUrlCache.class);
     private static final String KEY_PREFIX = "short-url:";
@@ -68,6 +69,15 @@ public class RedisUrlCache implements UrlCache {
         } catch (JsonProcessingException | RuntimeException cacheFailure) {
             log.warn("Redis write failed; redirect remains available from PostgreSQL for short code {}",
                     mapping.getShortCode());
+        }
+    }
+
+    @Override
+    public void evict(String shortCode) {
+        try {
+            redisTemplate.delete(key(shortCode));
+        } catch (RuntimeException cacheFailure) {
+            throw new CacheInvalidationException(cacheFailure);
         }
     }
 

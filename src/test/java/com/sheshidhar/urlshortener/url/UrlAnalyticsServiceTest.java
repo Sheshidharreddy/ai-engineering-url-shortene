@@ -31,7 +31,7 @@ class UrlAnalyticsServiceTest {
         UrlMapping mapping = UrlMapping.create("product1", "https://example.com", CREATED_AT, null);
         RedirectAnalyticsAggregate aggregate = aggregate(42, lastAccessedAt);
         when(urlMappingRepository.findByShortCode("product1")).thenReturn(Optional.of(mapping));
-        when(redirectEventRepository.summarizeByShortCode("product1")).thenReturn(aggregate);
+        when(redirectEventRepository.summarizeByShortCode("product1", CREATED_AT)).thenReturn(aggregate);
 
         UrlAnalyticsResponse response = service.get("product1");
 
@@ -46,7 +46,7 @@ class UrlAnalyticsServiceTest {
         UrlMapping mapping = UrlMapping.create("unused01", "https://example.com", CREATED_AT, null);
         RedirectAnalyticsAggregate aggregate = aggregate(0, null);
         when(urlMappingRepository.findByShortCode("unused01")).thenReturn(Optional.of(mapping));
-        when(redirectEventRepository.summarizeByShortCode("unused01")).thenReturn(aggregate);
+        when(redirectEventRepository.summarizeByShortCode("unused01", CREATED_AT)).thenReturn(aggregate);
 
         UrlAnalyticsResponse response = service.get("unused01");
 

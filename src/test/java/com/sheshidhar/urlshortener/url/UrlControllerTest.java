@@ -2,6 +2,7 @@ package com.sheshidhar.urlshortener.url;
 
 import com.sheshidhar.urlshortener.common.error.AliasAlreadyExistsException;
 import com.sheshidhar.urlshortener.common.error.ApiExceptionHandler;
+import com.sheshidhar.urlshortener.common.error.CacheInvalidationException;
 import com.sheshidhar.urlshortener.common.error.UrlNotFoundException;
 import com.sheshidhar.urlshortener.config.ApplicationConfig;
 import org.junit.jupiter.api.Test;
@@ -15,9 +16,11 @@ import org.springframework.test.web.servlet.MockMvc;
 import java.time.Instant;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -38,6 +41,9 @@ class UrlControllerTest {
 
     @MockitoBean
     private UrlAnalyticsService analyticsService;
+
+    @MockitoBean
+    private UrlDeletionService deletionService;
 
     @Test
     void returnsCreatedResponseAndLocation() throws Exception {
@@ -150,5 +156,21 @@ class UrlControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.totalClickCount").value(0))
                 .andExpect(jsonPath("$.lastAccessedAt").doesNotExist());
+    }
+
+    @Test
+    void deletesUrlIdempotently() throws Exception {
+        mockMvc.perform(delete("/api/v1/urls/product123"))
+                .andExpect(status().isNoContent());
+    }
+
+    @Test
+    void returnsServiceUnavailableWhenCacheCannotBeInvalidated() throws Exception {
+        doThrow(new CacheInvalidationException(new IllegalStateException("offline")))
+                .when(deletionService).delete("product123");
+
+        mockMvc.perform(delete("/api/v1/urls/product123"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("CACHE_UNAVAILABLE"));
     }
 }

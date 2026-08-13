@@ -5,6 +5,7 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -20,15 +21,18 @@ public class UrlController {
     private final UrlCreationService urlCreationService;
     private final UrlMetadataService urlMetadataService;
     private final UrlAnalyticsService urlAnalyticsService;
+    private final UrlDeletionService urlDeletionService;
 
     public UrlController(
             UrlCreationService urlCreationService,
             UrlMetadataService urlMetadataService,
-            UrlAnalyticsService urlAnalyticsService
+            UrlAnalyticsService urlAnalyticsService,
+            UrlDeletionService urlDeletionService
     ) {
         this.urlCreationService = urlCreationService;
         this.urlMetadataService = urlMetadataService;
         this.urlAnalyticsService = urlAnalyticsService;
+        this.urlDeletionService = urlDeletionService;
     }
 
     @Operation(summary = "Create a short URL")
@@ -59,5 +63,15 @@ public class UrlController {
     @GetMapping("/{shortCode}/analytics")
     public UrlAnalyticsResponse getAnalytics(@PathVariable String shortCode) {
         return urlAnalyticsService.get(shortCode);
+    }
+
+    @Operation(summary = "Delete a short URL")
+    @ApiResponse(responseCode = "204", description = "Short URL and analytics deleted")
+    @ApiResponse(responseCode = "400", description = "Short-code syntax is invalid")
+    @ApiResponse(responseCode = "503", description = "Database or cache is unavailable")
+    @DeleteMapping("/{shortCode}")
+    public ResponseEntity<Void> delete(@PathVariable String shortCode) {
+        urlDeletionService.delete(shortCode);
+        return ResponseEntity.noContent().build();
     }
 }

@@ -12,6 +12,12 @@ PostgreSQL is the source of truth. Redis is a cache-aside optimization on the re
 
 An expired mapping returns metadata with `expired: true` and `200 OK`. The mapping resource still exists even though following it returns `410 Gone`; this keeps the administrative metadata API useful without weakening redirect expiration behavior. Unknown codes return `404 Not Found`.
 
+## Deletion flow
+
+`DELETE /api/v1/urls/{shortCode}` is idempotent and returns `204 No Content` even when the mapping is already absent. Redis is evicted before and after the committed PostgreSQL transaction, narrowing the standard cache-aside race in which an in-flight read can repopulate a stale value. Cache invalidation is strict for deletion: failure returns `503 Service Unavailable`, allowing a retry to repair incomplete work.
+
+The database transaction deletes both the mapping and its analytics events. This prevents a reused custom alias from inheriting a previous mapping's click history and minimizes retained data. Analytics aggregation also filters events older than the current mapping's `createdAt`, protecting alias reuse from a late event written by an in-flight redirect.
+
 ## Redirect flow
 
 1. Validate `shortCode` against `^[A-Za-z0-9_-]{4,32}$`.
@@ -53,6 +59,10 @@ Short codes and aliases are case-sensitive, preserving the full Base62 keyspace.
 ## Cache availability
 
 Redis read, decode, and write failures fail open to PostgreSQL. Redis is excluded from aggregate health because cache loss is a degraded-performance condition, not loss of correctness or availability. PostgreSQL remains part of readiness through the datasource health contributor.
+
+## Health model
+
+Actuator exposes `/internal/actuator/health/liveness` and `/internal/actuator/health/readiness`. Liveness contains only Spring's application liveness state so an external dependency outage does not cause restart loops. Readiness explicitly includes the application readiness state and PostgreSQL; Redis remains excluded because redirects can fall back to PostgreSQL. Operations that require strict cache invalidation, such as deletion, return their own `503` when Redis is unavailable.
 
 ## URL security policy
 

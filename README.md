@@ -50,6 +50,14 @@ GET /api/v1/urls/{shortCode}/analytics
 
 Returns `shortCode`, `totalClickCount`, `createdAt`, and `lastAccessedAt`. A URL with no redirects has a count of zero and a null `lastAccessedAt`. Results are eventually consistent because redirect events are persisted asynchronously. Referrer, user-agent, and IP address are not collected to minimize personal data and retention obligations.
 
+### Delete a short URL
+
+```http
+DELETE /api/v1/urls/{shortCode}
+```
+
+Returns `204 No Content` whether the URL existed or was already absent, making retries idempotent. Deletion removes the PostgreSQL mapping and its analytics events, then invalidates the Redis redirect cache. A cache or database outage returns `503 Service Unavailable` rather than claiming a potentially incomplete deletion.
+
 See [architecture decisions](docs/architecture.md) for the trade-offs and reliability boundaries.
 
 ## Run locally
@@ -74,6 +82,7 @@ Operational endpoints:
 
 - Swagger UI: <http://localhost:8080/docs/swagger-ui.html>
 - OpenAPI JSON: <http://localhost:8080/v3/api-docs>
+- Liveness: <http://localhost:8080/internal/actuator/health/liveness>
 - Readiness: <http://localhost:8080/internal/actuator/health/readiness>
 - Metrics: <http://localhost:8080/internal/actuator/metrics>
 

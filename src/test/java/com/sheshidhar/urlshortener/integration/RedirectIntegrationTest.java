@@ -27,6 +27,7 @@ import java.time.Instant;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -152,6 +153,57 @@ class RedirectIntegrationTest {
                 .andExpect(jsonPath("$.totalClickCount").value(2))
                 .andExpect(jsonPath("$.createdAt").exists())
                 .andExpect(jsonPath("$.lastAccessedAt").exists());
+    }
+
+    @Test
+    void deleteRemovesMappingAnalyticsAndCacheAndAllowsSafeRetry() throws Exception {
+        urlMappingRepository.saveAndFlush(UrlMapping.create(
+                "delete01",
+                "https://example.com/delete",
+                Instant.now().minusSeconds(60),
+                null
+        ));
+
+        mockMvc.perform(get("/delete01"))
+                .andExpect(status().isFound());
+        await().atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> org.assertj.core.api.Assertions.assertThat(
+                        redirectEventRepository.countByShortCode("delete01")).isEqualTo(1));
+        org.assertj.core.api.Assertions.assertThat(redisTemplate.hasKey("short-url:delete01")).isTrue();
+
+        mockMvc.perform(delete("/api/v1/urls/delete01"))
+                .andExpect(status().isNoContent());
+
+        org.assertj.core.api.Assertions.assertThat(urlMappingRepository.findByShortCode("delete01")).isEmpty();
+        org.assertj.core.api.Assertions.assertThat(redirectEventRepository.countByShortCode("delete01")).isZero();
+        org.assertj.core.api.Assertions.assertThat(redisTemplate.hasKey("short-url:delete01")).isFalse();
+        mockMvc.perform(get("/delete01")).andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/v1/urls/delete01")).andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/v1/urls/delete01/analytics")).andExpect(status().isNotFound());
+
+        mockMvc.perform(delete("/api/v1/urls/delete01"))
+                .andExpect(status().isNoContent());
+
+        mockMvc.perform(post("/api/v1/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"url":"https://example.com/reused","customAlias":"delete01"}
+                                """))
+                .andExpect(status().isCreated());
+        mockMvc.perform(get("/api/v1/urls/delete01/analytics"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalClickCount").value(0))
+                .andExpect(jsonPath("$.lastAccessedAt").doesNotExist());
+    }
+
+    @Test
+    void actuatorProbesAreAvailable() throws Exception {
+        mockMvc.perform(get("/internal/actuator/health/liveness"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("UP"));
+        mockMvc.perform(get("/internal/actuator/health/readiness"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("UP"));
     }
 
     @Test

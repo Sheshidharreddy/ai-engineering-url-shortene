@@ -26,7 +26,10 @@ public class UrlAnalyticsService {
         shortCodeValidator.validate(shortCode);
         UrlMapping mapping = urlMappingRepository.findByShortCode(shortCode)
                 .orElseThrow(() -> new UrlNotFoundException(shortCode));
-        RedirectAnalyticsAggregate aggregate = redirectEventRepository.summarizeByShortCode(shortCode);
+        RedirectAnalyticsAggregate aggregate = redirectEventRepository.summarizeByShortCode(
+                shortCode,
+                mapping.getCreatedAt()
+        );
 
         return new UrlAnalyticsResponse(
                 mapping.getShortCode(),

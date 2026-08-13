@@ -1,6 +1,7 @@
 package com.sheshidhar.urlshortener.url;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -11,7 +12,14 @@ public interface RedirectEventRepository extends JpaRepository<RedirectEvent, Lo
     @Query("""
             SELECT COUNT(event) AS totalClickCount, MAX(event.occurredAt) AS lastAccessedAt
             FROM RedirectEvent event
-            WHERE event.shortCode = :shortCode
+            WHERE event.shortCode = :shortCode AND event.occurredAt >= :createdAt
             """)
-    RedirectAnalyticsAggregate summarizeByShortCode(@Param("shortCode") String shortCode);
+    RedirectAnalyticsAggregate summarizeByShortCode(
+            @Param("shortCode") String shortCode,
+            @Param("createdAt") java.time.Instant createdAt
+    );
+
+    @Modifying
+    @Query("DELETE FROM RedirectEvent event WHERE event.shortCode = :shortCode")
+    int deleteAllByShortCode(@Param("shortCode") String shortCode);
 }

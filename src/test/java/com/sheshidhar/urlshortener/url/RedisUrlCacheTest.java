@@ -1,6 +1,7 @@
 package com.sheshidhar.urlshortener.url;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sheshidhar.urlshortener.common.error.CacheInvalidationException;
 import com.sheshidhar.urlshortener.config.UrlShortenerProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,6 +17,7 @@ import java.time.ZoneOffset;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -83,5 +85,21 @@ class RedisUrlCacheTest {
         UrlMapping mapping = UrlMapping.create("abcd1234", "https://example.com", NOW, null);
 
         assertThatCode(() -> cache.put(mapping)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void evictsCachedUrl() {
+        cache.evict("abcd1234");
+
+        verify(redisTemplate).delete("short-url:abcd1234");
+    }
+
+    @Test
+    void exposesEvictionFailureToDeletionCallers() {
+        when(redisTemplate.delete("short-url:abcd1234"))
+                .thenThrow(new RedisConnectionFailureException("offline"));
+
+        assertThatThrownBy(() -> cache.evict("abcd1234"))
+                .isInstanceOf(CacheInvalidationException.class);
     }
 }

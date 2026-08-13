@@ -83,6 +83,12 @@ public class ApiExceptionHandler {
                 "Service temporarily unavailable", "The primary data store is temporarily unavailable");
     }
 
+1    @ExceptionHandler(CacheInvalidationException.class)
+    ResponseEntity<ProblemDetail> handleCacheUnavailable() {
+        return response(HttpStatus.SERVICE_UNAVAILABLE, "CACHE_UNAVAILABLE",
+                "Service temporarily unavailable", "The URL cache could not be invalidated");
+    }
+
     private ResponseEntity<ProblemDetail> response(
             HttpStatus status,
             String code,
