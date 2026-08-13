@@ -69,21 +69,94 @@ See the [API reference](docs/API.md) and [architecture decisions](docs/ARCHITECT
 
 ## Run locally
 
-Prerequisites: Docker Engine or Docker Desktop with Compose v2 support.
+Choose one of the following ways to run the application. Do not run the Compose
+`app` service and a local Java process at the same time because both use port
+`8080`.
+
+### Option 1: Run everything from the terminal with Docker Compose
+
+Prerequisite: Docker Engine or Docker Desktop with Compose v2 support.
 
 ```bash
 docker compose up --build
 ```
 
-Then create and follow a link:
+This starts PostgreSQL, Redis, and the application. Press `Ctrl+C` to stop them,
+then run `docker compose down` to remove the containers and network.
+
+### Option 2: Run the application from the terminal with Maven
+
+Prerequisites: Java 21, Maven 3.9+, and Docker Engine or Docker Desktop.
+
+Start only PostgreSQL and Redis in Docker:
 
 ```bash
-curl -i -X POST http://localhost:8080/api/v1/urls \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"https://example.com/products/123","customAlias":"product123"}'
-
-curl -i http://localhost:8080/product123
+docker compose up -d postgres redis
 ```
+
+Then start Spring Boot from the project root:
+
+```bash
+export DB_PASSWORD=url_shortener
+export BASE_URL=http://localhost:8080
+mvn spring-boot:run
+```
+
+Press `Ctrl+C` to stop the application. Run `docker compose down` when you no
+longer need PostgreSQL and Redis.
+
+### Option 3: Run the application from IntelliJ IDEA
+
+Prerequisites: IntelliJ IDEA, a Java 21 JDK, and Docker Engine or Docker Desktop.
+IntelliJ can use its bundled Maven installation.
+
+1. From a terminal in the project root, start only the dependencies:
+
+   ```bash
+   docker compose up -d postgres redis
+   ```
+
+2. Open the project directory in IntelliJ IDEA and import `pom.xml` as a Maven
+   project.
+3. Set the project SDK to Java 21 and allow Maven dependencies to finish
+   loading.
+4. Open `UrlShortenerApplication.java` and create or edit its Spring Boot run
+   configuration.
+5. Add these environment variables to the run configuration:
+
+   ```text
+   DB_PASSWORD=url_shortener
+   BASE_URL=http://localhost:8080
+   ```
+
+6. Run `UrlShortenerApplication`. The application is ready when the IntelliJ
+   console reports that it started on port `8080`.
+
+If the Compose `app` service is already running, stop it before starting from
+IntelliJ or Maven:
+
+```bash
+docker compose stop app
+```
+
+### Verify the running application
+
+The following commands work regardless of which run option you selected. A
+timestamp keeps the test alias unique across repeated runs:
+
+```bash
+export BASE_URL=http://localhost:8080
+export TEST_ALIAS="product-$(date +%s)"
+
+curl -i -X POST "${BASE_URL}/api/v1/urls" \
+  -H 'Content-Type: application/json' \
+  -d "{\"url\":\"https://example.com/products/123\",\"customAlias\":\"${TEST_ALIAS}\"}"
+
+curl -i "${BASE_URL}/${TEST_ALIAS}"
+```
+
+The create request should return `201 Created`, and the redirect request should
+return `302 Found`.
 
 The management API is intentionally unauthenticated for local development. When `MANAGEMENT_API_KEY` is configured, every `/api/v1/urls/**` request must include `X-API-Key`; public redirects remain unauthenticated.
 
@@ -97,7 +170,8 @@ Operational endpoints:
 - Metrics: <http://localhost:8080/internal/actuator/metrics>
 - Prometheus: <http://localhost:8080/internal/actuator/prometheus>
 
-Stop services with `docker compose down`. Add `--volumes` only when you intentionally want to delete local PostgreSQL and Redis data.
+Add `--volumes` to `docker compose down` only when you intentionally want to
+delete all local PostgreSQL and Redis data.
 
 ## Test
 
