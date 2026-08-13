@@ -4,6 +4,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -73,6 +75,12 @@ public class ApiExceptionHandler {
     ResponseEntity<ProblemDetail> handleGenerationFailure(ShortCodeGenerationException exception) {
         return response(HttpStatus.SERVICE_UNAVAILABLE, "SHORT_CODE_UNAVAILABLE",
                 "Short code temporarily unavailable", exception.getMessage());
+    }
+
+    @ExceptionHandler({DataAccessResourceFailureException.class, CannotCreateTransactionException.class})
+    ResponseEntity<ProblemDetail> handleDatabaseUnavailable() {
+        return response(HttpStatus.SERVICE_UNAVAILABLE, "DATABASE_UNAVAILABLE",
+                "Service temporarily unavailable", "The primary data store is temporarily unavailable");
     }
 
     private ResponseEntity<ProblemDetail> response(

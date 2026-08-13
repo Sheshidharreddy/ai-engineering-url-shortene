@@ -34,6 +34,22 @@ GET /{shortCode}
 
 Redis is checked before PostgreSQL. A database cache miss populates Redis, with TTL capped at the URL expiration time. Analytics is recorded asynchronously and cannot break a successful redirect.
 
+### URL metadata
+
+```http
+GET /api/v1/urls/{shortCode}
+```
+
+Returns `shortCode`, `shortUrl`, `originalUrl`, `createdAt`, `expiresAt`, and `expired`. Metadata is read from PostgreSQL and does not populate the redirect cache or record a redirect event. A known expired URL returns `200 OK` with `expired: true`; an unknown code returns `404 Not Found`.
+
+### Analytics
+
+```http
+GET /api/v1/urls/{shortCode}/analytics
+```
+
+Returns `shortCode`, `totalClickCount`, `createdAt`, and `lastAccessedAt`. A URL with no redirects has a count of zero and a null `lastAccessedAt`. Results are eventually consistent because redirect events are persisted asynchronously. Referrer, user-agent, and IP address are not collected to minimize personal data and retention obligations.
+
 See [architecture decisions](docs/architecture.md) for the trade-offs and reliability boundaries.
 
 ## Run locally

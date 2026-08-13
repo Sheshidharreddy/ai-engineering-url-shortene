@@ -11,6 +11,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.transaction.CannotCreateTransactionException;
 
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -62,5 +63,15 @@ class RedirectControllerTest {
         mockMvc.perform(get("/expired1"))
                 .andExpect(status().isGone())
                 .andExpect(jsonPath("$.code").value("SHORT_URL_EXPIRED"));
+    }
+
+    @Test
+    void returnsServiceUnavailableWhenPrimaryDatabaseCannotBeReached() throws Exception {
+        when(redirectService.resolve("missing1"))
+                .thenThrow(new CannotCreateTransactionException("database offline"));
+
+        mockMvc.perform(get("/missing1"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("DATABASE_UNAVAILABLE"));
     }
 }

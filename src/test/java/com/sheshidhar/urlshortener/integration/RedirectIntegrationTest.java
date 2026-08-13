@@ -27,9 +27,11 @@ import java.time.Instant;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import org.springframework.http.MediaType;
 
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest
@@ -81,14 +83,15 @@ class RedirectIntegrationTest {
     }
 
     @Test
-    void cacheMissLoadsPostgresPopulatesRedisAndRecordsAnalytics() throws Exception {
-        Instant now = Instant.now();
-        urlMappingRepository.saveAndFlush(UrlMapping.create(
-                "product1",
-                "https://example.com/products/1",
-                now,
-                now.plus(Duration.ofHours(1))
-        ));
+    void createThenCacheMissRedirectsPopulatesRedisAndRecordsAnalytics() throws Exception {
+        mockMvc.perform(post("/api/v1/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"url":"https://example.com/products/1","customAlias":"product1"}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Location", "http://localhost/product1"))
+                .andExpect(jsonPath("$.shortCode").value("product1"));
 
         mockMvc.perform(get("/product1"))
                 .andExpect(status().isFound())
@@ -98,6 +101,57 @@ class RedirectIntegrationTest {
                 .untilAsserted(() -> org.assertj.core.api.Assertions.assertThat(
                         redirectEventRepository.countByShortCode("product1")).isEqualTo(1));
         org.assertj.core.api.Assertions.assertThat(redisTemplate.hasKey("short-url:product1")).isTrue();
+    }
+
+    @Test
+    void metadataReadsPostgresWithoutPopulatingRedirectCacheOrAnalytics() throws Exception {
+        Instant createdAt = Instant.now().minusSeconds(120);
+        Instant expiresAt = Instant.now().minusSeconds(60);
+        urlMappingRepository.saveAndFlush(UrlMapping.create(
+                "metadata1",
+                "https://example.com/metadata",
+                createdAt,
+                expiresAt
+        ));
+
+        mockMvc.perform(get("/api/v1/urls/metadata1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.shortCode").value("metadata1"))
+                .andExpect(jsonPath("$.shortUrl").value("http://localhost/metadata1"))
+                .andExpect(jsonPath("$.originalUrl").value("https://example.com/metadata"))
+                .andExpect(jsonPath("$.createdAt").exists())
+                .andExpect(jsonPath("$.expiresAt").exists())
+                .andExpect(jsonPath("$.expired").value(true));
+
+        org.assertj.core.api.Assertions.assertThat(redisTemplate.hasKey("short-url:metadata1")).isFalse();
+        org.assertj.core.api.Assertions.assertThat(redirectEventRepository.countByShortCode("metadata1")).isZero();
+    }
+
+    @Test
+    void analyticsAggregatesPersistedRedirectEvents() throws Exception {
+        Instant createdAt = Instant.now().minusSeconds(60);
+        urlMappingRepository.saveAndFlush(UrlMapping.create(
+                "analytic1",
+                "https://example.com/analytics",
+                createdAt,
+                null
+        ));
+
+        mockMvc.perform(get("/analytic1"))
+                .andExpect(status().isFound());
+        mockMvc.perform(get("/analytic1"))
+                .andExpect(status().isFound());
+
+        await().atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> org.assertj.core.api.Assertions.assertThat(
+                        redirectEventRepository.countByShortCode("analytic1")).isEqualTo(2));
+
+        mockMvc.perform(get("/api/v1/urls/analytic1/analytics"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.shortCode").value("analytic1"))
+                .andExpect(jsonPath("$.totalClickCount").value(2))
+                .andExpect(jsonPath("$.createdAt").exists())
+                .andExpect(jsonPath("$.lastAccessedAt").exists());
     }
 
     @Test
