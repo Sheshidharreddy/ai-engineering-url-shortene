@@ -2,6 +2,10 @@
 
 Production-oriented URL shortener built with Java 21, Spring Boot 3, PostgreSQL, Redis, Flyway, OpenAPI, Actuator, and Testcontainers.
 
+## Architecture
+
+The application is a single Spring Boot deployable organized into controller, service, repository, entity, DTO, exception, configuration, validation, and mapper layers under `com.sheshidhar.urlshortener`. PostgreSQL is the source of truth, Redis is a cache-aside optimization for redirects, and analytics events are persisted asynchronously on a bounded executor.
+
 ## Behavior
 
 ### Create a short URL
@@ -56,13 +60,13 @@ Returns `shortCode`, `totalClickCount`, `createdAt`, and `lastAccessedAt`. A URL
 DELETE /api/v1/urls/{shortCode}
 ```
 
-Returns `204 No Content` whether the URL existed or was already absent, making retries idempotent. Deletion removes the PostgreSQL mapping and its analytics events, then invalidates the Redis redirect cache. A cache or database outage returns `503 Service Unavailable` rather than claiming a potentially incomplete deletion.
+Returns `204 No Content` whether the URL existed or was already absent, making retries idempotent. Deletion evicts Redis before and after removing the PostgreSQL mapping and analytics events. A cache or database outage returns `503 Service Unavailable` rather than claiming a potentially incomplete deletion.
 
-See [architecture decisions](docs/architecture.md) for the trade-offs and reliability boundaries.
+See the [API reference](docs/API.md) and [architecture decisions](docs/ARCHITECTURE.md) for endpoint details, trade-offs, and reliability boundaries.
 
 ## Run locally
 
-Prerequisites: Docker with Compose support.
+Prerequisites: Docker Engine or Docker Desktop with Compose v2 support.
 
 ```bash
 docker compose up --build
@@ -90,6 +94,8 @@ Stop services with `docker compose down`. Add `--volumes` only when you intentio
 
 ## Test
 
+Prerequisites: Java 21 and Maven 3.9+. Docker is also required for the PostgreSQL and Redis Testcontainers integration suite.
+
 ```bash
 mvn clean verify
 ```
@@ -112,3 +118,19 @@ Configuration is externalized through environment variables. Important defaults 
 | `URL_CACHE_TTL` | `24h` |
 
 Production deployments must replace default database credentials and set `BASE_URL` to the public HTTPS origin.
+
+Copy `.env.example` when you need a local environment-variable template. Docker Compose supplies its own local service values, so copying the file is not required for `docker compose up --build`.
+
+## Engineering documentation
+
+- [API reference](docs/API.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Requirements traceability](docs/REQUIREMENTS_TRACEABILITY.md)
+- [Three engineering scenarios](docs/SCENARIOS.md)
+- [Trade-offs](docs/TRADEOFFS.md)
+- [Security](docs/SECURITY.md)
+- [Engineer-led AI usage](docs/AI_USAGE.md)
+
+## Known limitations
+
+The service has no authentication, ownership, rate limiting, or public-link abuse controls. Analytics is eventually consistent and best effort. Operational endpoints must be network-restricted in production. These boundaries are intentional for the assessment and are detailed in the linked documentation.

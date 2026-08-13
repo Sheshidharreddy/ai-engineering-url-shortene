@@ -1,10 +1,12 @@
 package com.sheshidhar.urlshortener.integration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.sheshidhar.urlshortener.url.CachedUrl;
-import com.sheshidhar.urlshortener.url.RedirectEventRepository;
-import com.sheshidhar.urlshortener.url.UrlMapping;
-import com.sheshidhar.urlshortener.url.UrlMappingRepository;
+import com.sheshidhar.urlshortener.dto.CachedUrl;
+import com.sheshidhar.urlshortener.entity.UrlMapping;
+import com.sheshidhar.urlshortener.repository.RedirectEventRepository;
+import com.sheshidhar.urlshortener.repository.UrlMappingRepository;
+import com.sheshidhar.urlshortener.service.RedisUrlCache;
+import com.sheshidhar.urlshortener.service.UrlDeletionService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -12,9 +14,12 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -23,7 +28,13 @@ import org.testcontainers.utility.DockerImageName;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -32,7 +43,6 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-import org.springframework.http.MediaType;
 
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest
@@ -73,6 +83,15 @@ class RedirectIntegrationTest {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private RedisUrlCache redisUrlCache;
+
+    @Autowired
+    private UrlDeletionService urlDeletionService;
+
+    @Autowired
+    private PlatformTransactionManager transactionManager;
 
     @BeforeEach
     void cleanState() {
@@ -197,7 +216,66 @@ class RedirectIntegrationTest {
     }
 
     @Test
+    void concurrentCacheMissCannotRepopulateCacheAfterDeletion() throws Exception {
+        String shortCode = "delete02";
+        UrlMapping mapping = urlMappingRepository.saveAndFlush(UrlMapping.create(
+                shortCode,
+                "https://example.com/concurrent-delete",
+                Instant.now().minusSeconds(60),
+                null
+        ));
+        redisUrlCache.put(mapping);
+        assertThat(redisTemplate.hasKey("short-url:" + shortCode)).isTrue();
+
+        CountDownLatch rowLocked = new CountDownLatch(1);
+        CountDownLatch populateCache = new CountDownLatch(1);
+        CountDownLatch cachePopulated = new CountDownLatch(1);
+        CountDownLatch releaseReader = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<?> reader = executor.submit(() -> {
+                TransactionTemplate transaction = new TransactionTemplate(transactionManager);
+                transaction.executeWithoutResult(status -> {
+                    UrlMapping lockedMapping = urlMappingRepository.findByShortCodeForRedirect(shortCode)
+                            .orElseThrow();
+                    rowLocked.countDown();
+                    awaitLatch(populateCache);
+                    redisUrlCache.put(lockedMapping);
+                    cachePopulated.countDown();
+                    awaitLatch(releaseReader);
+                });
+            });
+
+            awaitLatch(rowLocked);
+            Future<?> deletion = executor.submit(() -> urlDeletionService.delete(shortCode));
+
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(redisTemplate.hasKey("short-url:" + shortCode)).isFalse());
+            populateCache.countDown();
+            awaitLatch(cachePopulated);
+
+            assertThat(redisTemplate.hasKey("short-url:" + shortCode)).isTrue();
+            assertThat(deletion.isDone()).isFalse();
+
+            releaseReader.countDown();
+            reader.get(5, TimeUnit.SECONDS);
+            deletion.get(5, TimeUnit.SECONDS);
+
+            assertThat(urlMappingRepository.findByShortCode(shortCode)).isEmpty();
+            assertThat(redisTemplate.hasKey("short-url:" + shortCode)).isFalse();
+        } finally {
+            populateCache.countDown();
+            releaseReader.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void actuatorProbesAreAvailable() throws Exception {
+        mockMvc.perform(get("/internal/actuator/health"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("UP"));
         mockMvc.perform(get("/internal/actuator/health/liveness"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("UP"));
@@ -254,5 +332,16 @@ class RedirectIntegrationTest {
         assertThatThrownBy(() -> urlMappingRepository.saveAndFlush(
                 UrlMapping.create("unique01", "https://example.com/2", now, null)))
                 .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                throw new AssertionError("Timed out waiting for concurrent test step");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("Concurrent test was interrupted", exception);
+        }
     }
 }
