@@ -6,6 +6,7 @@ import com.sheshidhar.urlshortener.dto.CreateUrlResponse;
 import com.sheshidhar.urlshortener.entity.UrlMapping;
 import com.sheshidhar.urlshortener.exception.AliasAlreadyExistsException;
 import com.sheshidhar.urlshortener.exception.InvalidCustomAliasException;
+import com.sheshidhar.urlshortener.exception.ShortCodeGenerationException;
 import com.sheshidhar.urlshortener.mapper.UrlMapper;
 import com.sheshidhar.urlshortener.repository.UrlMappingRepository;
 import com.sheshidhar.urlshortener.repository.UrlMappingWriter;
@@ -99,6 +100,24 @@ class UrlCreationServiceTest {
 
         assertThat(response.shortCode()).isEqualTo("unique01");
         verify(generator, org.mockito.Mockito.times(2)).generate();
+    }
+
+    @Test
+    void failsAfterGeneratedCodeRetryLimitIsExhausted() {
+        when(generator.generate()).thenReturn("collision");
+        when(writer.save(any(UrlMapping.class)))
+                .thenThrow(new DataIntegrityViolationException("unique constraint"));
+
+        assertThatThrownBy(() -> service.create(new CreateUrlRequest(DESTINATION, null, null)))
+                .isInstanceOf(ShortCodeGenerationException.class);
+        verify(generator, org.mockito.Mockito.times(5)).generate();
+    }
+
+    @Test
+    void rejectsExpirationThatIsNotInTheFuture() {
+        assertThatThrownBy(() -> service.create(new CreateUrlRequest(DESTINATION, null, NOW)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("expiresAt must be in the future");
     }
 
     @Test

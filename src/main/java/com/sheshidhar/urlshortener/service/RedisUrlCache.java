@@ -8,6 +8,7 @@ import com.sheshidhar.urlshortener.entity.UrlMapping;
 import com.sheshidhar.urlshortener.exception.CacheInvalidationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -45,9 +46,10 @@ public class RedisUrlCache implements UrlCache, UrlCacheInvalidator {
             return cachedValue == null
                     ? Optional.empty()
                     : Optional.of(objectMapper.readValue(cachedValue, CachedUrl.class));
-        } catch (JsonProcessingException | RuntimeException cacheFailure) {
-            log.warn("Redis lookup or cache decoding failed; falling back to PostgreSQL for short code {}",
-                    shortCode);
+        } catch (JsonProcessingException | DataAccessException cacheFailure) {
+            log.warn("Redis lookup or cache decoding failed; falling back to PostgreSQL for short code {} ({})",
+                    shortCode, cacheFailure.getClass().getSimpleName());
+            log.debug("Redis lookup failure details for short code {}", shortCode, cacheFailure);
             return Optional.empty();
         }
     }
@@ -68,9 +70,10 @@ public class RedisUrlCache implements UrlCache, UrlCacheInvalidator {
         try {
             String cachedValue = objectMapper.writeValueAsString(CachedUrl.from(mapping));
             redisTemplate.opsForValue().set(key(mapping.getShortCode()), cachedValue, ttl);
-        } catch (JsonProcessingException | RuntimeException cacheFailure) {
-            log.warn("Redis write failed; redirect remains available from PostgreSQL for short code {}",
-                    mapping.getShortCode());
+        } catch (JsonProcessingException | DataAccessException cacheFailure) {
+            log.warn("Redis write failed; redirect remains available from PostgreSQL for short code {} ({})",
+                    mapping.getShortCode(), cacheFailure.getClass().getSimpleName());
+            log.debug("Redis write failure details for short code {}", mapping.getShortCode(), cacheFailure);
         }
     }
 
@@ -78,7 +81,7 @@ public class RedisUrlCache implements UrlCache, UrlCacheInvalidator {
     public void evict(String shortCode) {
         try {
             redisTemplate.delete(key(shortCode));
-        } catch (RuntimeException cacheFailure) {
+        } catch (DataAccessException cacheFailure) {
             throw new CacheInvalidationException(cacheFailure);
         }
     }

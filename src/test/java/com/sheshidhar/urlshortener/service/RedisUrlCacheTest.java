@@ -81,6 +81,23 @@ class RedisUrlCacheTest {
     }
 
     @Test
+    void doesNotHideUnexpectedProgrammingFailure() {
+        when(valueOperations.get("short-url:abcd1234"))
+                .thenThrow(new IllegalStateException("unexpected bug"));
+
+        assertThatThrownBy(() -> cache.find("abcd1234"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("unexpected bug");
+    }
+
+    @Test
+    void treatsMalformedCachedValueAsCacheMiss() {
+        when(valueOperations.get("short-url:abcd1234")).thenReturn("{not-json");
+
+        assertThat(cache.find("abcd1234")).isEmpty();
+    }
+
+    @Test
     void ignoresRedisWriteFailure() {
         doThrow(new RedisConnectionFailureException("offline"))
                 .when(valueOperations).set(eq("short-url:abcd1234"), any(String.class), any(Duration.class));

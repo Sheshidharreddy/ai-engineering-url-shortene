@@ -31,8 +31,8 @@ jobs:
       - name: Test and package
         run: mvn --batch-mode --no-transfer-progress clean verify
 
-      - name: Assert container integration tests executed
-        run: grep -q 'skipped="0"' target/surefire-reports/TEST-com.sheshidhar.urlshortener.integration.RedirectIntegrationTest.xml
+      - name: Assert all container integration tests executed
+        run: grep -Eq '<testsuite .*tests="14" errors="0" skipped="0" failures="0"' target/surefire-reports/TEST-com.sheshidhar.urlshortener.integration.RedirectIntegrationTest.xml
 
       - name: Build runtime image
         run: docker build --tag ai-engineering-url-shortener:ci .

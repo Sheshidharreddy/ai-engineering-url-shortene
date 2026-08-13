@@ -8,20 +8,30 @@ Status values:
 - `PARTIAL`: implemented but missing complete verification.
 - `FAIL`: not implemented or behavior does not meet the requirement.
 
+## Audit Summary
+
+| Result | Count |
+| --- | ---: |
+| PASS | 43 |
+| PARTIAL | 0 |
+| FAIL | 0 |
+
+Every minimum requirement listed in Step 2 has a corresponding implementation and automated test, except the sensitive-data-retention requirement, where direct entity and migration inspection is the appropriate verification. No assessment requirement is unmapped.
+
 ## URL Creation
 
 | Requirement | Implementation | Test | Status |
 | --- | --- | --- | --- |
 | `POST /api/v1/urls` | `UrlController.create` | `UrlControllerTest.returnsCreatedResponseAndLocation`; `RedirectIntegrationTest.createThenCacheMissRedirectsPopulatesRedisAndRecordsAnalytics` | PASS |
 | HTTP `201 Created` | `UrlController.create` returns `ResponseEntity.created` | `UrlControllerTest.returnsCreatedResponseAndLocation` | PASS |
-| Destination URL validation | `CreateUrlRequest`; `DestinationUrlValidator` | `DestinationUrlValidatorTest`; `UrlControllerTest.returnsValidationProblemForInvalidAlias` | PASS |
-| HTTP/HTTPS only | `DestinationUrlValidator.ALLOWED_SCHEMES` | `DestinationUrlValidatorTest.rejectsUnsafeOrMalformedDestination` | PASS |
+| Destination URL validation | `CreateUrlRequest`; `DestinationUrlValidator` | `DestinationUrlValidatorTest`; `UrlControllerTest.returnsValidationProblemForOversizedUrl` | PASS |
+| HTTP/HTTPS only | `DestinationUrlValidator.ALLOWED_SCHEMES` | `DestinationUrlValidatorTest.acceptsAbsoluteHttpUrl`; `DestinationUrlValidatorTest.acceptsAndTrimsAbsoluteHttpsUrl`; `DestinationUrlValidatorTest.rejectsUnsafeOrMalformedDestination` | PASS |
 | Optional custom alias | `CreateUrlRequest.customAlias`; `UrlCreationService.createWithCustomAlias` | `UrlCreationServiceTest.createsCustomAliasAndBuildsResponse` | PASS |
-| Optional expiration | `CreateUrlRequest.expiresAt`; `UrlCreationService.validateExpiration` | `UrlCreationServiceTest.createsCustomAliasAndBuildsResponse` | PASS |
-| Generated short code | `SecureRandomShortCodeGenerator`; `UrlCreationService.createWithGeneratedCode` | `UrlCreationServiceTest.retriesGeneratedCodeAfterDatabaseCollision` | PASS |
-| Database uniqueness constraint | Flyway constraint `uq_url_mappings_short_code`; `UrlMapping.shortCode` | `RedirectIntegrationTest.databaseEnforcesShortCodeUniqueness` | PASS |
-| Duplicate custom alias handling | `UrlCreationService.createWithCustomAlias`; `AliasAlreadyExistsException`; `ApiExceptionHandler` | `UrlCreationServiceTest.returnsConflictWhenAliasAlreadyExists`; `UrlControllerTest.returnsConflictForDuplicateAlias` | PASS |
-| Collision retry | `UrlCreationService.createWithGeneratedCode` uses bounded database-backed retries | `UrlCreationServiceTest.retriesGeneratedCodeAfterDatabaseCollision` | PASS |
+| Optional expiration | `CreateUrlRequest.expiresAt`; `UrlCreationService.validateExpiration` | `UrlCreationServiceTest.createsCustomAliasAndBuildsResponse`; `UrlCreationServiceTest.rejectsExpirationThatIsNotInTheFuture` | PASS |
+| Generated short code | `SecureRandomShortCodeGenerator`; `UrlCreationService.createWithGeneratedCode` | `SecureRandomShortCodeGeneratorTest.generatesConfiguredLengthBase62Code`; `UrlCreationServiceTest.retriesGeneratedCodeAfterDatabaseCollision` | PASS |
+| Database uniqueness constraint | Flyway constraint `uq_url_mappings_short_code`; `UrlMapping.shortCode` | `RedirectIntegrationTest.databaseEnforcesShortCodeUniqueness`; `RedirectIntegrationTest.simultaneousCustomAliasCreationCreatesExactlyOneMapping` | PASS |
+| Duplicate custom alias handling | `UrlCreationService.createWithCustomAlias`; `AliasAlreadyExistsException`; `ApiExceptionHandler` | `UrlCreationServiceTest.returnsConflictWhenAliasAlreadyExists`; `UrlControllerTest.returnsConflictForDuplicateAlias`; `RedirectIntegrationTest.simultaneousCustomAliasCreationCreatesExactlyOneMapping` | PASS |
+| Collision retry | `UrlCreationService.createWithGeneratedCode` uses bounded database-backed retries | `UrlCreationServiceTest.retriesGeneratedCodeAfterDatabaseCollision`; `UrlCreationServiceTest.failsAfterGeneratedCodeRetryLimitIsExhausted`; `UrlControllerTest.returnsServiceUnavailableWhenUniqueCodeCannotBeAllocated`; `RedirectIntegrationTest.generatedCodeCollisionRetriesAfterDatabaseConstraintFailure` | PASS |
 | DTO response | `CreateUrlResponse` | `UrlControllerTest.returnsCreatedResponseAndLocation` | PASS |
 | `createdAt` | `UrlMapping.createdAt`; `CreateUrlResponse.createdAt` | `UrlCreationServiceTest.createsCustomAliasAndBuildsResponse` | PASS |
 | `expiresAt` | `UrlMapping.expiresAt`; `CreateUrlResponse.expiresAt` | `UrlCreationServiceTest.createsCustomAliasAndBuildsResponse` | PASS |
@@ -33,10 +43,10 @@ Status values:
 | --- | --- | --- | --- |
 | `GET /{shortCode}` | `RedirectController.redirect` | `RedirectControllerTest.returnsFoundWithDestinationLocation`; `RedirectIntegrationTest.createThenCacheMissRedirectsPopulatesRedisAndRecordsAnalytics` | PASS |
 | Short-code validation | `ShortCodeValidator`; `UrlRedirectService.resolve` | `UrlRedirectServiceTest.rejectsMalformedCodeBeforeAccessingInfrastructure`; `RedirectControllerTest.returnsBadRequestForMalformedCode` | PASS |
-| Redis lookup | `RedisUrlCache.find`; `UrlRedirectService.resolve` | `RedisUrlCacheTest.readsExpiryAwareValueFromRedis`; `UrlRedirectServiceTest.returnsUnexpiredRedisValueWithoutQueryingPostgres` | PASS |
-| PostgreSQL fallback | `UrlRedirectDatabaseResolver.resolveAndCache` | `UrlRedirectServiceTest.queriesPostgresAndPopulatesRedisOnCacheMiss`; `UrlRedirectDatabaseResolverTest.resolvesLockedMappingAndPopulatesCache` | PASS |
-| Expiration check | `CachedUrl.isExpiredAt`; `UrlMapping.isExpiredAt` | `UrlRedirectServiceTest.returnsGoneForExpiredCachedValue`; `UrlRedirectDatabaseResolverTest.rejectsExpiredMappingWithoutPopulatingCache` | PASS |
-| Cache population | `UrlRedirectDatabaseResolver.resolveAndCache`; `RedisUrlCache.put` | `UrlRedirectDatabaseResolverTest.resolvesLockedMappingAndPopulatesCache`; `RedirectIntegrationTest.createThenCacheMissRedirectsPopulatesRedisAndRecordsAnalytics` | PASS |
+| Redis lookup | `RedisUrlCache.find`; `UrlRedirectService.resolve` | `RedisUrlCacheTest.readsExpiryAwareValueFromRedis`; `RedisUrlCacheTest.treatsRedisFailureAsCacheMiss`; `UrlRedirectServiceTest.returnsUnexpiredRedisValueWithoutQueryingPostgres` | PASS |
+| PostgreSQL fallback | `UrlRedirectDatabaseResolver.resolveAndCache` | `UrlRedirectServiceTest.queriesPostgresAndPopulatesRedisOnCacheMiss`; `UrlRedirectDatabaseResolverTest.resolvesLockedMappingAndPopulatesCache`; `RedirectControllerTest.returnsServiceUnavailableWhenPrimaryDatabaseCannotBeReached`; `RedirectIntegrationTest.redisOutageFallsBackToPostgresForRedirect` | PASS |
+| Expiration check | `CachedUrl.isExpiredAt`; `UrlMapping.isExpiredAt` | `UrlRedirectServiceTest.returnsGoneForExpiredCachedValue`; `UrlRedirectDatabaseResolverTest.rejectsExpiredMappingWithoutPopulatingCache`; `RedirectIntegrationTest.expiredMappingReturnsGone` | PASS |
+| Cache population | `UrlRedirectDatabaseResolver.resolveAndCache`; `RedisUrlCache.put` | `UrlRedirectDatabaseResolverTest.resolvesLockedMappingAndPopulatesCache`; `RedirectIntegrationTest.createThenCacheMissRedirectsPopulatesRedisAndRecordsAnalytics`; `RedirectIntegrationTest.malformedCachedValueFallsBackToPostgresAndRepairsCache` | PASS |
 | Analytics invocation | `UrlRedirectService.recordAnalyticsWithoutAffectingRedirect` | `UrlRedirectServiceTest.returnsUnexpiredRedisValueWithoutQueryingPostgres`; `RedirectIntegrationTest.analyticsAggregatesPersistedRedirectEvents` | PASS |
 | Analytics failure isolation | `UrlRedirectService` contains submission failures; `AsyncRedirectAnalyticsRecorder` contains persistence failures | `UrlRedirectServiceTest.analyticsSubmissionFailureDoesNotBreakRedirect`; `AsyncRedirectAnalyticsRecorderTest.persistenceFailureIsContainedAndCounted` | PASS |
 | Redirect response | `RedirectController` returns HTTP `302` and `Location` | `RedirectControllerTest.returnsFoundWithDestinationLocation` | PASS |
@@ -91,8 +101,8 @@ mvn --batch-mode --no-transfer-progress clean verify
 
 The Testcontainers integration class requires a compatible Docker daemon. CI explicitly fails if that class is skipped.
 
-Latest local verification on August 12, 2026:
+Latest local verification on August 13, 2026:
 
-- `mvn --batch-mode --no-transfer-progress clean verify`: 57 non-container tests passed; the 10 container tests were skipped because the local Docker 20.10 daemon supports API 1.41 while docker-java initially requested API 1.44.
-- `mvn --batch-mode --no-transfer-progress -Dapi.version=1.41 -Dtest=RedirectIntegrationTest test`: all 10 PostgreSQL and Redis Testcontainers tests passed with no failures, errors, or skips.
-- Combined result: 67 tests passed, including the concurrent cache-miss deletion regression test.
+- `mvn --batch-mode --no-transfer-progress -Dapi.version=1.41 clean verify`
+- 83 tests passed with no failures, errors, or skips.
+- The result includes 69 unit, repository, and MockMvc tests plus all 14 PostgreSQL and Redis Testcontainers tests.

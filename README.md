@@ -1,6 +1,6 @@
 # ai-engineering-url-shortener
 
-Production-oriented URL shortener built with Java 21, Spring Boot 3, PostgreSQL, Redis, Flyway, OpenAPI, Actuator, and Testcontainers.
+Production-oriented URL shortener built with Java 21, Spring Boot 3.5, PostgreSQL, Redis, Flyway, OpenAPI, Actuator, and Testcontainers.
 
 ## Architecture
 
@@ -17,7 +17,7 @@ Content-Type: application/json
 {
   "url": "https://example.com/products/123",
   "customAlias": "product123",
-  "expiresAt": "2026-09-01T00:00:00Z"
+  "expiresAt": "2099-01-01T00:00:00Z"
 }
 ```
 
@@ -86,6 +86,7 @@ Operational endpoints:
 
 - Swagger UI: <http://localhost:8080/docs/swagger-ui.html>
 - OpenAPI JSON: <http://localhost:8080/v3/api-docs>
+- Health: <http://localhost:8080/internal/actuator/health>
 - Liveness: <http://localhost:8080/internal/actuator/health/liveness>
 - Readiness: <http://localhost:8080/internal/actuator/health/readiness>
 - Metrics: <http://localhost:8080/internal/actuator/metrics>
@@ -102,6 +103,8 @@ mvn clean verify
 
 Unit and MockMvc tests run without infrastructure. Testcontainers tests start real PostgreSQL and Redis when a compatible Docker daemon is available. CI uses Temurin Java 21 and runs the full suite.
 
+Testcontainers can skip its integration class when Docker is unavailable or its API cannot be negotiated, even if Maven itself reports success. Confirm that the final result has zero skipped tests. Legacy Docker daemons limited to API 1.41 can use `mvn -Dapi.version=1.41 clean verify`; that compatibility command was used for the verified 83-test, zero-skip local run. CI separately asserts that the 14 container-backed tests executed.
+
 ## Configuration
 
 Configuration is externalized through environment variables. Important defaults include:
@@ -110,21 +113,41 @@ Configuration is externalized through environment variables. Important defaults 
 | --- | --- |
 | `DB_URL` | `jdbc:postgresql://localhost:5432/url_shortener` |
 | `DB_USERNAME` | `url_shortener` |
-| `DB_PASSWORD` | `url_shortener` |
+| `DB_PASSWORD` | Required; Docker Compose supplies a local development value |
 | `REDIS_HOST` | `localhost` |
 | `REDIS_PORT` | `6379` |
 | `BASE_URL` | `http://localhost:8080` |
 | `SHORT_CODE_LENGTH` | `8` |
 | `URL_CACHE_TTL` | `24h` |
 
-Production deployments must replace default database credentials and set `BASE_URL` to the public HTTPS origin.
+Production deployments must set `DB_PASSWORD`, replace local development credentials, and set `BASE_URL` to the public HTTPS origin.
 
 Copy `.env.example` when you need a local environment-variable template. Docker Compose supplies its own local service values, so copying the file is not required for `docker compose up --build`.
+
+## Engineering scenarios
+
+- **Greenfield:** decomposes the initial service into HTTP, business, persistence, validation, caching, and analytics concerns, followed by focused, integration, and runtime validation.
+- **Brownfield:** evolves a PostgreSQL-only redirect into Redis cache-aside with expiry-aware TTL, PostgreSQL fallback, strict deletion invalidation, and concurrency-safe cache population.
+- **Ambiguous requirement:** resolves what analytics counts, which metadata is retained, how failures affect redirects, and what consistency and retention assumptions apply before implementation.
+
+The complete scenario narratives, risks, tests, and engineer decisions are in [docs/SCENARIOS.md](docs/SCENARIOS.md).
+
+## Engineer-led AI usage
+
+AI assisted with repository review and implementation options; the engineer supplied context and constraints, reviewed recommendations, made the final decision, and validated accepted work. The record includes a suggestion accepted for deletion/cache ordering, a transaction recommendation modified after real PostgreSQL behavior, and a root-page suggestion rejected as out-of-scope feature work. See [docs/AI_USAGE.md](docs/AI_USAGE.md).
+
+## Key trade-offs
+
+- PostgreSQL provides authoritative uniqueness and deletion correctness, but cache misses depend on database availability.
+- Redis improves redirect latency and cache-hit availability, but requires expiry-aware values and carefully ordered invalidation.
+- A pessimistic read lock closes the deletion/cache race, but cache-miss transactions can briefly delay deletion.
+- Asynchronous analytics protects redirect reliability, but delivery is best effort and can undercount.
 
 ## Engineering documentation
 
 - [API reference](docs/API.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Step 1 repository inspection](docs/REPOSITORY_INSPECTION.md)
 - [Requirements traceability](docs/REQUIREMENTS_TRACEABILITY.md)
 - [Three engineering scenarios](docs/SCENARIOS.md)
 - [Trade-offs](docs/TRADEOFFS.md)
@@ -133,4 +156,4 @@ Copy `.env.example` when you need a local environment-variable template. Docker 
 
 ## Known limitations
 
-The service has no authentication, ownership, rate limiting, or public-link abuse controls. Analytics is eventually consistent and best effort. Operational endpoints must be network-restricted in production. These boundaries are intentional for the assessment and are detailed in the linked documentation.
+The service has no authentication, ownership, rate limiting, or public-link abuse controls. Analytics is eventually consistent and best effort. Operational endpoints must be network-restricted in production. PostgreSQL driver socket/query deadlines are not globally configured, and creation currently classifies any database integrity violation as a code collision or alias conflict. These boundaries are intentional for the assessment and are detailed in the linked documentation.

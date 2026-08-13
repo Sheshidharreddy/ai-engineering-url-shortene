@@ -14,6 +14,7 @@ import java.util.Set;
 public class DestinationUrlValidator {
 
     private static final Set<String> ALLOWED_SCHEMES = Set.of("http", "https");
+    private static final int MAX_URL_LENGTH = 2_048;
 
     public String validateAndNormalize(String candidate) {
         if (candidate == null) {
@@ -39,7 +40,11 @@ public class DestinationUrlValidator {
                 throw new InvalidDestinationUrlException("url port must be between 1 and 65535");
             }
 
-            return normalizeHost(trimmed, uri, url, scheme);
+            String normalized = normalizeHost(trimmed, uri, url, scheme);
+            if (normalized.length() > MAX_URL_LENGTH) {
+                throw new InvalidDestinationUrlException("url must not exceed 2048 characters after normalization");
+            }
+            return normalized;
         } catch (IllegalArgumentException | java.net.MalformedURLException | URISyntaxException exception) {
             throw new InvalidDestinationUrlException("url is not a valid URI");
         }

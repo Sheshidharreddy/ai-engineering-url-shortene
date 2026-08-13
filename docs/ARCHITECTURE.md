@@ -66,7 +66,7 @@ Short codes and aliases are case-sensitive, preserving the full Base62 keyspace.
 
 ## Cache availability
 
-Redis read, decode, and write failures fail open to PostgreSQL. Redis is excluded from aggregate health because cache loss is a degraded-performance condition, not loss of correctness or availability. PostgreSQL remains part of readiness through the datasource health contributor.
+Redis read or decode failures become cache misses and fall back to PostgreSQL. A Redis write failure leaves the PostgreSQL-backed redirect successful without caching it. Redis is excluded from aggregate health because cache loss is a degraded-performance condition, not loss of correctness or availability. PostgreSQL remains part of readiness through the datasource health contributor.
 
 ## Health model
 

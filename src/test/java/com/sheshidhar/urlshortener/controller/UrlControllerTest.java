@@ -8,6 +8,7 @@ import com.sheshidhar.urlshortener.dto.UrlMetadataResponse;
 import com.sheshidhar.urlshortener.exception.AliasAlreadyExistsException;
 import com.sheshidhar.urlshortener.exception.ApiExceptionHandler;
 import com.sheshidhar.urlshortener.exception.CacheInvalidationException;
+import com.sheshidhar.urlshortener.exception.ShortCodeGenerationException;
 import com.sheshidhar.urlshortener.exception.UrlNotFoundException;
 import com.sheshidhar.urlshortener.service.UrlAnalyticsService;
 import com.sheshidhar.urlshortener.service.UrlCreationService;
@@ -88,6 +89,31 @@ class UrlControllerTest {
     }
 
     @Test
+    void returnsMalformedRequestProblemForInvalidJson() throws Exception {
+        mockMvc.perform(post("/api/v1/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"url\":"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("MALFORMED_REQUEST"));
+    }
+
+    @Test
+    void returnsValidationProblemForOversizedUrl() throws Exception {
+        String oversizedUrl = "https://example.com/" + "a".repeat(2_048);
+
+        mockMvc.perform(post("/api/v1/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"url":"%s"}
+                                """.formatted(oversizedUrl)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"))
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("url"));
+
+        verifyNoInteractions(creationService);
+    }
+
+    @Test
     void returnsConflictForDuplicateAlias() throws Exception {
         when(creationService.create(any(CreateUrlRequest.class)))
                 .thenThrow(new AliasAlreadyExistsException("product123"));
@@ -99,6 +125,20 @@ class UrlControllerTest {
                                 """))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("ALIAS_ALREADY_EXISTS"));
+    }
+
+    @Test
+    void returnsServiceUnavailableWhenUniqueCodeCannotBeAllocated() throws Exception {
+        when(creationService.create(any(CreateUrlRequest.class)))
+                .thenThrow(new ShortCodeGenerationException());
+
+        mockMvc.perform(post("/api/v1/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"url":"https://example.com"}
+                                """))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("SHORT_CODE_UNAVAILABLE"));
     }
 
     @Test

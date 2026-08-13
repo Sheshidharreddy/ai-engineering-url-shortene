@@ -1,12 +1,21 @@
 package com.sheshidhar.urlshortener.integration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sheshidhar.urlshortener.config.UrlShortenerProperties;
+import com.sheshidhar.urlshortener.dto.CreateUrlRequest;
+import com.sheshidhar.urlshortener.dto.CreateUrlResponse;
 import com.sheshidhar.urlshortener.dto.CachedUrl;
 import com.sheshidhar.urlshortener.entity.UrlMapping;
+import com.sheshidhar.urlshortener.exception.AliasAlreadyExistsException;
+import com.sheshidhar.urlshortener.mapper.UrlMapper;
 import com.sheshidhar.urlshortener.repository.RedirectEventRepository;
 import com.sheshidhar.urlshortener.repository.UrlMappingRepository;
+import com.sheshidhar.urlshortener.repository.UrlMappingWriter;
 import com.sheshidhar.urlshortener.service.RedisUrlCache;
+import com.sheshidhar.urlshortener.service.ShortCodeGenerator;
+import com.sheshidhar.urlshortener.service.UrlCreationService;
 import com.sheshidhar.urlshortener.service.UrlDeletionService;
+import com.sheshidhar.urlshortener.validator.DestinationUrlValidator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,13 +35,16 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -91,6 +103,24 @@ class RedirectIntegrationTest {
     private UrlDeletionService urlDeletionService;
 
     @Autowired
+    private UrlCreationService urlCreationService;
+
+    @Autowired
+    private UrlMappingWriter urlMappingWriter;
+
+    @Autowired
+    private DestinationUrlValidator destinationUrlValidator;
+
+    @Autowired
+    private UrlShortenerProperties urlShortenerProperties;
+
+    @Autowired
+    private UrlMapper urlMapper;
+
+    @Autowired
+    private Clock clock;
+
+    @Autowired
     private PlatformTransactionManager transactionManager;
 
     @BeforeEach
@@ -121,6 +151,52 @@ class RedirectIntegrationTest {
                 .untilAsserted(() -> org.assertj.core.api.Assertions.assertThat(
                         redirectEventRepository.countByShortCode("product1")).isEqualTo(1));
         org.assertj.core.api.Assertions.assertThat(redisTemplate.hasKey("short-url:product1")).isTrue();
+    }
+
+    @Test
+    void redisOutageFallsBackToPostgresForRedirect() throws Exception {
+        urlMappingRepository.saveAndFlush(UrlMapping.create(
+                "redisoff",
+                "https://example.com/postgres-fallback",
+                Instant.now().minusSeconds(60),
+                null
+        ));
+        REDIS.getDockerClient().pauseContainerCmd(REDIS.getContainerId()).exec();
+
+        try {
+            mockMvc.perform(get("/redisoff"))
+                    .andExpect(status().isFound())
+                    .andExpect(header().string("Location", "https://example.com/postgres-fallback"));
+        } finally {
+            REDIS.getDockerClient().unpauseContainerCmd(REDIS.getContainerId()).exec();
+            await().atMost(Duration.ofSeconds(5))
+                    .ignoreExceptions()
+                    .untilAsserted(() -> {
+                        try (RedisConnection connection = redisTemplate.getConnectionFactory().getConnection()) {
+                            assertThat(connection.ping()).isEqualTo("PONG");
+                        }
+                    });
+        }
+    }
+
+    @Test
+    void malformedCachedValueFallsBackToPostgresAndRepairsCache() throws Exception {
+        urlMappingRepository.saveAndFlush(UrlMapping.create(
+                "badcache",
+                "https://example.com/cache-repair",
+                Instant.now().minusSeconds(60),
+                null
+        ));
+        redisTemplate.opsForValue().set("short-url:badcache", "{not-json", Duration.ofMinutes(1));
+
+        mockMvc.perform(get("/badcache"))
+                .andExpect(status().isFound())
+                .andExpect(header().string("Location", "https://example.com/cache-repair"));
+
+        String repairedValue = redisTemplate.opsForValue().get("short-url:badcache");
+        assertThat(repairedValue).isNotNull();
+        assertThat(objectMapper.readValue(repairedValue, CachedUrl.class).originalUrl())
+                .isEqualTo("https://example.com/cache-repair");
     }
 
     @Test
@@ -282,6 +358,8 @@ class RedirectIntegrationTest {
         mockMvc.perform(get("/internal/actuator/health/readiness"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("UP"));
+        mockMvc.perform(get("/internal/actuator/info"))
+                .andExpect(status().isNotFound());
     }
 
     @Test
@@ -311,6 +389,7 @@ class RedirectIntegrationTest {
         mockMvc.perform(get("/expired1"))
                 .andExpect(status().isGone())
                 .andExpect(jsonPath("$.code").value("SHORT_URL_EXPIRED"));
+        assertThat(redisTemplate.hasKey("short-url:expired1")).isFalse();
     }
 
     @Test
@@ -334,6 +413,72 @@ class RedirectIntegrationTest {
                 .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
     }
 
+    @Test
+    void simultaneousCustomAliasCreationCreatesExactlyOneMapping() throws Exception {
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<CreationOutcome> first = executor.submit(() -> createAliasAfterStart(ready, start));
+            Future<CreationOutcome> second = executor.submit(() -> createAliasAfterStart(ready, start));
+
+            awaitLatch(ready);
+            start.countDown();
+
+            assertThat(List.of(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS)))
+                    .containsExactlyInAnyOrder(CreationOutcome.CREATED, CreationOutcome.CONFLICT);
+            assertThat(urlMappingRepository.findByShortCode("samealias")).isPresent();
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void generatedCodeCollisionRetriesAfterDatabaseConstraintFailure() {
+        Instant now = clock.instant();
+        urlMappingRepository.saveAndFlush(UrlMapping.create(
+                "collision",
+                "https://example.com/existing",
+                now.minusSeconds(1),
+                null
+        ));
+        AtomicInteger generatedCodes = new AtomicInteger();
+        ShortCodeGenerator generator = () -> generatedCodes.getAndIncrement() == 0 ? "collision" : "unique02";
+        UrlCreationService collisionAwareService = new UrlCreationService(
+                urlMappingRepository,
+                urlMappingWriter,
+                generator,
+                destinationUrlValidator,
+                urlShortenerProperties,
+                urlMapper,
+                clock
+        );
+
+        CreateUrlResponse response = collisionAwareService.create(
+                new CreateUrlRequest("https://example.com/generated", null, null)
+        );
+
+        assertThat(response.shortCode()).isEqualTo("unique02");
+        assertThat(generatedCodes).hasValue(2);
+        assertThat(urlMappingRepository.findByShortCode("unique02")).isPresent();
+    }
+
+    private CreationOutcome createAliasAfterStart(CountDownLatch ready, CountDownLatch start) {
+        ready.countDown();
+        awaitLatch(start);
+        try {
+            urlCreationService.create(new CreateUrlRequest(
+                    "https://example.com/concurrent-alias",
+                    "samealias",
+                    null
+            ));
+            return CreationOutcome.CREATED;
+        } catch (AliasAlreadyExistsException conflict) {
+            return CreationOutcome.CONFLICT;
+        }
+    }
+
     private static void awaitLatch(CountDownLatch latch) {
         try {
             if (!latch.await(5, TimeUnit.SECONDS)) {
@@ -343,5 +488,10 @@ class RedirectIntegrationTest {
             Thread.currentThread().interrupt();
             throw new AssertionError("Concurrent test was interrupted", exception);
         }
+    }
+
+    private enum CreationOutcome {
+        CREATED,
+        CONFLICT
     }
 }

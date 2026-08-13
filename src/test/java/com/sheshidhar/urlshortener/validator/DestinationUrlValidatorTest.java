@@ -19,6 +19,12 @@ class DestinationUrlValidatorTest {
     }
 
     @Test
+    void acceptsAbsoluteHttpUrl() {
+        assertThat(validator.validateAndNormalize("http://example.com/products/123"))
+                .isEqualTo("http://example.com/products/123");
+    }
+
+    @Test
     void convertsInternationalHostToAscii() {
         assertThat(validator.validateAndNormalize("https://münich.example/path"))
                 .isEqualTo("https://xn--mnich-kva.example/path");
@@ -28,6 +34,8 @@ class DestinationUrlValidatorTest {
     @ValueSource(strings = {
             "ftp://example.com/file",
             "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,<script>alert(1)</script>",
             "https:///missing-host",
             "https://user:secret@example.com/private",
             "https://example.com:0/path",
@@ -36,5 +44,14 @@ class DestinationUrlValidatorTest {
     void rejectsUnsafeOrMalformedDestination(String candidate) {
         assertThatThrownBy(() -> validator.validateAndNormalize(candidate))
                 .isInstanceOf(InvalidDestinationUrlException.class);
+    }
+
+    @Test
+    void rejectsUrlThatExceedsLimitAfterAsciiNormalization() {
+        String candidate = "https://example.com/" + "é".repeat(500);
+
+        assertThatThrownBy(() -> validator.validateAndNormalize(candidate))
+                .isInstanceOf(InvalidDestinationUrlException.class)
+                .hasMessage("url must not exceed 2048 characters after normalization");
     }
 }
